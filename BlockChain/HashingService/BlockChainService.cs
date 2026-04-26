@@ -81,14 +81,14 @@ namespace BlockChain.HashingService
         public void IncreaseDifficulty(double medianMiningTime)
         {
             double ratio = _targetMiningTime / medianMiningTime;
-            int delta = (int)Math.Max(1, Math.Log(ratio, 16));
+            int delta = (int)Math.Min(Math.Max(1, Math.Log(ratio, 16)), 6);
             Difficulty += delta;
         }
 
         public void DecreaseDifficulty(double medianMiningTime)
         {
             double ratio = medianMiningTime / _targetMiningTime;
-            int delta = (int)Math.Max(1, Math.Log(ratio, 16));
+            int delta = (int)Math.Min(Math.Max(1, Math.Log(ratio, 16)), 6);
             Difficulty = Math.Max(1, Difficulty - delta);
         }
 
