@@ -8,7 +8,7 @@ namespace BlockChain.HashingService
 
         public int Difficulty = 0; // Difficulty level for mining (number of leading zeros required in the hash)
 
-        private readonly double _targetMiningTime = 1; // Target mining time in seconds for dynamic difficulty adjustment
+        private readonly double _targetMiningTime = 10; // Target mining time in seconds for dynamic difficulty adjustment
         private readonly int difficultyAdjustmentInterval = 10; // Amount to adjust the difficulty by when mining time is too short or too long
         public BlockChainService()
         {
