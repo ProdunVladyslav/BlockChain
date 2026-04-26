@@ -8,7 +8,7 @@
         public string Author { get; set; }
         public string Hash { get; set; }
         public string PreviousHash { get; set; }
-        public int DifficultyAtMining { get; set; }
+        public double DifficultyAtMining { get; set; }
 
         public long Nonce { get; set; } // Added Nonce property for proof-of-work
 
@@ -16,7 +16,7 @@
 
         public Block ShallowCopy() => (Block)MemberwiseClone();
 
-        public Block(int index, DateTime timestamp, string data, string previousHash, string author, int difficultyAtMining)
+        public Block(int index, DateTime timestamp, string data, string previousHash, string author, double difficultyAtMining)
         {
             Index = index;
             Timestamp = timestamp;

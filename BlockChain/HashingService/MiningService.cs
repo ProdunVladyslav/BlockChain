@@ -4,31 +4,7 @@ namespace BlockChain.HashingService
 {
     public class MiningService
     {
-        public static long MineBlock(Block block, int difficulty)
-        {
-            var target = new string('0', difficulty); // Create a target string consisting of '0's based on the specified difficulty level
-
-            var stopWatch = System.Diagnostics.Stopwatch.StartNew(); // Start a stopwatch to measure mining duration
-            while (true)
-            {
-                block.Nonce++; // Increment the nonce value to try a new hash
-                string hash = HashingService.ComputeHash(block); // Compute the hash of the block with the current nonce
-                if (block.Nonce % 100_000 == 0)
-                {
-                    Console.Write(".");
-                }
-
-                if (hash.StartsWith(target))
-                {
-                    Console.WriteLine("Found a valid hash!");
-                    stopWatch.Stop(); // Stop the stopwatch once a valid hash is found
-                    block.MiningDurationBlock = stopWatch.Elapsed.TotalSeconds; // Store the mining duration in seconds
-                    return block.Nonce;
-                }
-            }
-        }
-
-        public static long MineBlockMultiThreaded(Block block, int difficulty)
+        public static long MineBlockMultiThreaded(Block block, double difficulty)
         {
             int numberOfThreads = Environment.ProcessorCount; // Get the number of available CPU cores
             var threads = new Thread[numberOfThreads];
@@ -61,20 +37,24 @@ namespace BlockChain.HashingService
             return -1;
         }
 
-        static void MineBlockThread(Block block, int difficulty, long startNonce, long step, ref long foundNonce, CancellationTokenSource cts)
+        static void MineBlockThread(Block block, double difficulty, long startNonce, long step, ref long foundNonce, CancellationTokenSource cts)
         {
-            var target = new string('0', difficulty); // Create a target string consisting of '0's based on the specified difficulty level
+            int wholePart = (int)difficulty; // Get the whole number part of the difficulty level
+            var target = new string('0', wholePart); // Create a target string consisting of '0's based on the specified difficulty level
+            double fraction = difficulty - wholePart;
+            string hexChars = "0123456789abcdef";
+            char fractionalChar = hexChars[15 - Math.Min(15, (int)(fraction * 16))];
             long nonce = startNonce; // Start nonce based on the thread ID to ensure different starting points for each thread
             while (!cts.Token.IsCancellationRequested)
             {
                 nonce += step; // Increment the nonce value by the step size to ensure different nonces for each thread
                 string rawData = $"{block.Index}{block.Timestamp}{block.Data}{block.PreviousHash}{block.Author}{nonce}";
                 string hash = HashingService.ComputeHash(rawData); // Compute the hash of the block with the current nonce
-                if (hash.StartsWith(target))
+                if (hash.StartsWith(target) && hash[wholePart] <= fractionalChar)
                 {
                     Console.WriteLine($"Thread {Thread.CurrentThread.ManagedThreadId} found a valid hash!");
                     Interlocked.CompareExchange(ref foundNonce, nonce, -1);
-                    cts.Cancel();
+                    cts.Cancel(); 
                     return; // Exit the thread once a valid hash is found
                 }
             }

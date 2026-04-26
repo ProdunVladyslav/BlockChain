@@ -5,7 +5,7 @@ var blockChainService = new BlockChainService();
 
 long i = 0;
 
-while (i < 100)
+while (i < 100_000)
 {
     blockChainService.AddBlock("First Block", "Alex");
     if(i % 10 == 0)

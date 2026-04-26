@@ -6,9 +6,9 @@ namespace BlockChain.HashingService
     {
         public List<Block> Chain { get; private set; } // List to hold the blocks in the blockchain
 
-        public int Difficulty = 0; // Difficulty level for mining (number of leading zeros required in the hash)
+        public double Difficulty = 1.0; // Difficulty level for mining (number of leading zeros required in the hash)
 
-        private readonly double _targetMiningTime = 10; // Target mining time in seconds for dynamic difficulty adjustment
+        private readonly double _targetMiningTime = 2.5; // Target mining time in seconds for dynamic difficulty adjustment
         private readonly int difficultyAdjustmentInterval = 10; // Amount to adjust the difficulty by when mining time is too short or too long
         public BlockChainService()
         {
@@ -66,30 +66,16 @@ namespace BlockChain.HashingService
             else
                 medianMiningTime = sorted[count / 2];
 
-            if (medianMiningTime < _targetMiningTime)
-            {
-                Console.WriteLine($"Median mining time {medianMiningTime:F2}s is less than target. Increasing difficulty.");
-                IncreaseDifficulty(medianMiningTime);
-            }
-            else if (medianMiningTime > _targetMiningTime)
-            {
-                Console.WriteLine($"Median mining time {medianMiningTime:F2}s is greater than target. Decreasing difficulty.");
-                DecreaseDifficulty(medianMiningTime);
-            }
-        }
-
-        public void IncreaseDifficulty(double medianMiningTime)
-        {
+            double oldDifficulty = Difficulty;
             double ratio = _targetMiningTime / medianMiningTime;
-            int delta = (int)Math.Min(Math.Max(1, Math.Log(ratio, 16)), 6);
-            Difficulty += delta;
-        }
 
-        public void DecreaseDifficulty(double medianMiningTime)
-        {
-            double ratio = medianMiningTime / _targetMiningTime;
-            int delta = (int)Math.Min(Math.Max(1, Math.Log(ratio, 16)), 6);
-            Difficulty = Math.Max(1, Difficulty - delta);
+            // Limit to max +0.25 / -0.25 difficulty levels per adjustment
+            double maxDifficulty = oldDifficulty + 0.25;
+            double minDifficulty = Math.Max(1.0, oldDifficulty - 0.25);
+
+            Difficulty = Math.Clamp(oldDifficulty * ratio, minDifficulty, maxDifficulty);
+
+            Console.WriteLine($"Median: {medianMiningTime:F2}s, Target: {_targetMiningTime}s, Difficulty adjusted from {oldDifficulty:F2} to {Difficulty:F2}");
         }
 
         public bool IsChainValid()
@@ -106,7 +92,11 @@ namespace BlockChain.HashingService
                 {
                     return false;
                 }
-                if (!currentBlock.Hash.StartsWith(new string('0', currentBlock.DifficultyAtMining))) // Check if the current block's hash meets the difficulty requirement
+                int wholePart = (int)currentBlock.DifficultyAtMining;
+                double fraction = currentBlock.DifficultyAtMining - wholePart;
+                string hexChars = "0123456789abcdef";
+                char fractionalChar = hexChars[15 - Math.Min(15, (int)(fraction * 16))];
+                if (!currentBlock.Hash.StartsWith(new string('0', wholePart)) || currentBlock.Hash[wholePart] > fractionalChar) // Check if the current block's hash meets the difficulty requirement
                 {
                     return false;
                 }
