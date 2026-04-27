@@ -4,7 +4,7 @@
     {
         public int Index { get; set; }
         public DateTime Timestamp { get; set; }
-        public string Data { get; set; }
+        public List<Transaction> Transactions { get; set; }
         public string Author { get; set; }
         public string Hash { get; set; }
         public string PreviousHash { get; set; }
@@ -16,11 +16,11 @@
 
         public Block ShallowCopy() => (Block)MemberwiseClone();
 
-        public Block(int index, DateTime timestamp, string data, string previousHash, string author, double difficultyAtMining)
+        public Block(int index, DateTime timestamp, List<Transaction> transactions, string previousHash, string author, double difficultyAtMining)
         {
             Index = index;
             Timestamp = timestamp;
-            Data = data;
+            Transactions = transactions;
             PreviousHash = previousHash;
             Hash = "";
             Author = author;

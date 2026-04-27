@@ -9,7 +9,8 @@ namespace BlockChain.HashingService
         // Method to compute the hash of a block
         public static string ComputeHash(Block block)
         {
-            string rawData = $"{block.Index}{block.Timestamp}{block.Data}{block.PreviousHash}{block.Author}{block.Nonce}"; // Concatenate block properties to create a string representation of the block's data
+            var dataString = string.Concat(block.Transactions.Select(t => t.ToRawString())); // Convert the list of transactions to a single string representation
+            string rawData = $"{block.Index}{block.Timestamp}{dataString}{block.PreviousHash}{block.Author}{block.Nonce}"; // Concatenate block properties to create a string representation of the block's data
             return ComputeHash(rawData); // Compute the hash of the raw data string
         }
 

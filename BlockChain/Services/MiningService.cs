@@ -48,7 +48,8 @@ namespace BlockChain.HashingService
             while (!cts.Token.IsCancellationRequested)
             {
                 nonce += step; // Increment the nonce value by the step size to ensure different nonces for each thread
-                string rawData = $"{block.Index}{block.Timestamp}{block.Data}{block.PreviousHash}{block.Author}{nonce}";
+                var dataString = string.Concat(block.Transactions.Select(t => t.ToRawString()));
+                string rawData = $"{block.Index}{block.Timestamp}{dataString}{block.PreviousHash}{block.Author}{nonce}";
                 string hash = HashingService.ComputeHash(rawData); // Compute the hash of the block with the current nonce
                 if (hash.StartsWith(target) && hash[wholePart] <= fractionalChar)
                 {

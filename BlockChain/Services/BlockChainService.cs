@@ -1,4 +1,5 @@
 ﻿using BlockChain.Model;
+using BlockChain.Services;
 
 namespace BlockChain.HashingService
 {
@@ -10,6 +11,7 @@ namespace BlockChain.HashingService
 
         private readonly double _targetMiningTime = 2.5; // Target mining time in seconds for dynamic difficulty adjustment
         private readonly int difficultyAdjustmentInterval = 10; // Amount to adjust the difficulty by when mining time is too short or too long
+
         public BlockChainService()
         {
             Chain = new List<Block>(); // Initialize the blockchain as an empty list
@@ -18,16 +20,27 @@ namespace BlockChain.HashingService
 
         private void AddGenesisBlock()
         {
-            Block genesisBlock = new Block(0, DateTime.Parse("2024-06-01T00:00:00Z"), "Genesis Block", "0", "Name", Difficulty);
+            Block genesisBlock = new Block(0, DateTime.Parse("2024-06-01T00:00:00Z"), new List<Transaction>(), "0", "Name", Difficulty);
             genesisBlock.Hash = HashingService.ComputeHash(genesisBlock); // Compute the hash for the genesis block
             Chain.Add(genesisBlock);
         }
 
-        public void AddBlock(string data, string author)
+        public void AddBlock(List<Transaction> transactions, string author)
         {
+            foreach (Transaction transaction in transactions)
+            {
+                var isValid = TransactionService.ValidateTransaction(transaction); // Validate each transaction in the list using the TransactionService
+                if (!isValid.isValid)
+                {
+                    Console.WriteLine($"Invalid transaction detected: {isValid.error}");
+                    return;
+                }
+            }
+
+            //transactions.Add(new Transaction("COINBASE", author, 0)); // Add a reward transaction for the miner (author) to the list of transactions
+
             Block previousBlock = Chain.Last();
-            Block newBlock = new Block(previousBlock.Index + 1, DateTime.UtcNow, data, previousBlock.Hash, author, Difficulty);
-            // removed first ComputeHash here
+            Block newBlock = new Block(previousBlock.Index + 1, DateTime.UtcNow, transactions, previousBlock.Hash, author, Difficulty);
             MiningService.MineBlockMultiThreaded(newBlock, Difficulty);
             newBlock.Hash = HashingService.ComputeHash(newBlock); // ← only this one matters
             Chain.Add(newBlock);
