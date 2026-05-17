@@ -21,25 +21,30 @@ namespace BlockChain.Model
 
         [JsonPropertyName("amount")]
         public decimal Amount { get; set; }
+
+        [JsonPropertyName("fee")]
+        public decimal Fee { get; set; }
+
         [JsonPropertyName("timestamp")]
         public DateTime Timestamp { get; set; } = DateTime.UtcNow;
 
-        public Transaction(string from, string to, decimal amount)
+        public Transaction(string from, string to, decimal amount, decimal fee)
         {
             Id = Guid.NewGuid();
             From = from;
             To = to;
             Amount = amount;
+            Fee = fee;
         }
 
         public string ToRawString()
         {
-            return $"{From}{To}{Amount}{Timestamp:O}";
+            return $"{From}{To}{Amount}{Fee}{Timestamp:O}";
         }
 
         public override string ToString()
         {
-            return $"Transaction {Id}, From: {From}, To: {To}, Amount: {Amount}, Timestamp: {Timestamp:O}";
+            return $"Transaction {Id}, From: {From}, To: {To}, Amount: {Amount}, Fee: {Fee}, Timestamp: {Timestamp:O}";
         }
     }
 }

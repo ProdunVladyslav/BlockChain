@@ -36,6 +36,31 @@ namespace BlockChain.Services
                 .ToList();
         }
 
+        public decimal GetTotalBurnedFees()
+        {
+            return blockChain.Chain
+                .Skip(1)
+                .SelectMany(b => b.Transactions)
+                .Where(t => t.From != "COINBASE")
+                .Sum(t => blockChain.NetworkBaseFee);
+        }
+
+        public decimal GetActualTotalSupply()
+        {
+            decimal totalEmitted = blockChain.Chain
+                .SelectMany(b => b.Transactions)
+                .Where(t => t.From == "COINBASE")
+                .Sum(t => t.Amount);
+
+            decimal totalTips = blockChain.Chain
+                .Skip(1)
+                .SelectMany(b => b.Transactions)
+                .Where(t => t.From != "COINBASE")
+                .Sum(t => t.Fee - blockChain.NetworkBaseFee);
+
+            return totalEmitted - GetTotalBurnedFees() - totalTips;
+        }
+
         public (Block? block, Transaction? tx) FindTransactionLocation(Guid txId)
         {
 

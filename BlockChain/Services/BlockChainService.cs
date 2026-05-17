@@ -8,21 +8,27 @@ namespace BlockChain.HashingService
     public class BlockChainService
     {
         public List<Block> Chain { get; private set; } // List to hold the blocks in the blockchain
-        private MiningService MiningService;
-        private decimal MiningReward = 50; // Reward for mining a block (not currently used in this implementation)
-        private int HalvingInterval = 5; // Number of blocks after which the mining reward is halved (not currently used in this implementation)
+        private MiningService _miningService;
+        public decimal _miningReward = 50m; // Reward for mining a block (not currently used in this implementation)
+        private int _halvingInterval = 5; // Number of blocks after which the mining reward is halved (not currently used in this implementation)
 
         public double Difficulty = 1.0; // Difficulty level for mining (number of leading zeros required in the hash)
+        public readonly int MaxTransactionsPerBlock = 100; // Maximum number of transactions allowed in a single block to prevent excessively large blocks
+        public decimal NetworkBaseFee { get; set; } = 1.0m;
+
+        public List<Transaction> PendingTransactions = new List<Transaction>(); // List to hold pending transactions that have not yet been included in a block
 
         private readonly double _targetMiningTime = 2.5; // Target mining time in seconds for dynamic difficulty adjustment
         private readonly int difficultyAdjustmentInterval = 10; // Amount to adjust the difficulty by when mining time is too short or too long
+        private readonly int _rateLimitPerSender = 3; // Maximum number of pending transactions allowed per sender to prevent spamming
+        private readonly int _ttlTransactionsSeconds = 10; // Time-to-live for transactions in the mempool (not currently implemented, but could be used to remove old transactions)
 
         private readonly Dictionary<string, decimal> Balances = new Dictionary<string, decimal>(); // Dictionary to track balances of public keys (not currently used in this implementation)
 
         public BlockChainService()
         {
             Chain = new List<Block>(); // Initialize the blockchain as an empty list
-            MiningService = new MiningService();
+            _miningService = new MiningService();
             AddGenesisBlock();
         }
 
@@ -33,40 +39,71 @@ namespace BlockChain.HashingService
             Chain.Add(genesisBlock);
         }
 
-        public void AddBlock(List<Transaction> transactions, string minerAddress)
+        public void AddTransactionToMempool(Transaction transaction)
         {
-            foreach (Transaction transaction in transactions)
+
+            if(transaction.Fee < NetworkBaseFee)
             {
-                var isValid = TransactionService.ValidateTransaction(transaction); // Validate each transaction in the list using the TransactionService
-                if (!isValid.isValid)
+                Console.WriteLine($"Transaction from {transaction.From} rejected: Fee {transaction.Fee} is below the network base fee of {NetworkBaseFee}.");
+                return;
+            }
+
+            if (transaction.From !="COINBASE")
+            {
+                var balance = GetBalance(transaction.From);
+                var totalPendingAmount = PendingTransactions.Where(x => x.From == transaction.From).Sum(x => x.Amount + x.Fee);
+                if (balance < totalPendingAmount + transaction.Amount + transaction.Fee)
                 {
-                    Console.WriteLine($"Invalid transaction detected: {isValid.error}");
-                    return;
-                }
-                var senderBalance = GetBalance(transaction.From); // Get the balance of the sender's public key
-                if (senderBalance < transaction.Amount)
-                {
-                    Console.WriteLine($"Insufficient balance for transaction from {transaction.From}");
+                    Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient funds.");
                     return;
                 }
             }
 
-            if (Chain.Count % HalvingInterval == 0)
+            var isValid = TransactionService.ValidateTransaction(transaction); // Validate the transaction using the TransactionService
+            var rateLimited = PendingTransactions.Where(x => x.From == transaction.From).Count() >= _rateLimitPerSender; // Simple rate limit: max 5 pending transactions per sender
+            if (isValid.isValid && !rateLimited)
             {
-                MiningReward /= 2; // Halve the mining reward every 5 blocks (not currently used in this implementation)
+                PendingTransactions.Add(transaction); // Add the transaction to the mempool if it is valid
             }
+            else if (rateLimited)
+            {
+                Console.WriteLine($"Transaction from {transaction.From} rejected due to rate limit. Max {_rateLimitPerSender} pending transactions allowed per sender.");
+            }
+            else
+            {
+                Console.WriteLine($"Invalid transaction from {transaction.From} rejected: {isValid.error}");
+            }
+        }
 
-            transactions.Add(new Transaction("COINBASE", minerAddress, MiningReward)); // Add a reward transaction for the miner (author) to the list of transactions
+        public void MineBlock(string minerPublicKey)
+        {
+            PendingTransactions.RemoveAll(t => t.Timestamp < DateTime.UtcNow.AddSeconds(-_ttlTransactionsSeconds)); // Remove transactions that have exceeded their time-to-live from the mempool
+            var transactionsToInclude = new List<Transaction>(PendingTransactions.OrderByDescending(x => x.Fee).Take(MaxTransactionsPerBlock)); // Create a copy of the pending transactions to include in the new block
+            var totalFees = transactionsToInclude.Sum(t => (t.Fee - NetworkBaseFee)); // Calculate the total fees from the transactions to include in the block
 
-            Block previousBlock = Chain.Last();
-            Block newBlock = new Block(previousBlock.Index + 1, DateTime.UtcNow, transactions, previousBlock.Hash, minerAddress, Difficulty);
-            MiningService.MineBlockMultiThreaded(newBlock, Difficulty);
-            newBlock.Hash = HashingService.ComputeHash(newBlock); // ← only this one matters
-            Chain.Add(newBlock);
+            var totalReward = _miningReward + totalFees; // Calculate the total reward for mining the block (base reward + transaction fees)
+
+            var rewardTransaction = new Transaction
+            (
+                from: "COINBASE",
+                to: minerPublicKey,
+                amount: totalReward,
+                fee: 0m
+            );
+
+            transactionsToInclude.Add(rewardTransaction);
+
+            var lastBlock = Chain.Last();
+            Block newBlock = new Block(lastBlock.Index + 1, DateTime.UtcNow, transactionsToInclude, lastBlock.Hash, minerPublicKey, Difficulty);
+
+            MiningService.MineBlockMultiThreaded(newBlock, Difficulty); // Mine the new block using the MiningService
+            Chain.Add(newBlock); // Add the new block to the blockchain
+            PendingTransactions.RemoveAll(t => transactionsToInclude.Contains(t)); // Remove the included transactions from the mempool
             UpdateBalances(newBlock); // Update the balances based on the transactions in the new block
+
             if (newBlock.Index % difficultyAdjustmentInterval == 0)
             {
-                //AdjustDifficulty(newBlock);
+                AdjustDifficulty();
             }
         }
 
@@ -79,7 +116,7 @@ namespace BlockChain.HashingService
             }
         }
 
-        private void AdjustDifficulty(Block newBlock)
+        private void AdjustDifficulty()
         {
             var recentBlocks = Chain
                 .Skip(Math.Max(0, Chain.Count - difficultyAdjustmentInterval))
@@ -176,7 +213,7 @@ namespace BlockChain.HashingService
                     {
                         Balances[transaction.From] = 0;
                     }
-                    Balances[transaction.From] -= transaction.Amount; // Subtract the amount from the sender's balance
+                    Balances[transaction.From] -= (transaction.Amount + transaction.Fee); // not + fee - NetworkBaseFee// Subtract the amount from the sender's balance
                 }
                 if (!Balances.ContainsKey(transaction.To))
                 {

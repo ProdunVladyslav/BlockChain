@@ -10,9 +10,9 @@ namespace BlockChain.Services
             cryptoService = new CryptoService();
         }
 
-        public static Transaction CreateTransction(string from, string to, decimal amount)
+        public static Transaction CreateTransaction(string from, string to, decimal amount, decimal fee)
         {
-            var tx = new Transaction(from, to, amount);
+            var tx = new Transaction(from, to, amount, fee);
             var validation = ValidateTransaction(tx);
             if (!validation.isValid)
             {
@@ -34,6 +34,7 @@ namespace BlockChain.Services
                 return (false, "Transaction must be signed.");
             if(!cryptoService.VerifySignature(transaction.ToRawString(), transaction.Signature, transaction.From)) // Assuming From is the public key or address that can be used to verify the signature
                 return (false, "Invalid transaction signature.");
+            if(transaction.Fee < 0) return (false, "Transaction fee must be non-negative.");
             return (true, string.Empty);
         }
 

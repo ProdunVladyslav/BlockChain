@@ -29,6 +29,7 @@ namespace BlockChain.HashingService
             {
                 Console.WriteLine($"Valid hash found with nonce: {foundNonce}");
                 block.Nonce = foundNonce;
+                block.Hash = HashingService.ComputeHash(block);
                 block.MiningDurationBlock = stopWatch.Elapsed.TotalSeconds; // Store the mining duration in seconds
                 block.DifficultyAtMining = difficulty;
                 return foundNonce;
