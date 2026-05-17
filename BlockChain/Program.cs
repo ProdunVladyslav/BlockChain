@@ -5,160 +5,272 @@ using BlockChain.Services;
 var blockChainService = new BlockChainService();
 var cryptoService = new CryptoService();
 
-var alice = new Wallet(cryptoService);
-var bob = new Wallet(cryptoService);
-var charlie = new Wallet(cryptoService);
-var miner1 = new Wallet(cryptoService);
+// Pre-generated wallets for the session
+var wallets = new Dictionary<string, Wallet>(StringComparer.OrdinalIgnoreCase);
+var pendingTransactions = new List<Transaction>();
 
-Console.WriteLine($"Network Base Fee: {blockChainService.NetworkBaseFee}");
+Console.WriteLine("Blockchain CLI started.");
+Console.WriteLine("No wallets exist yet. Use option [5] to create one.\n");
 
-Transaction Signed(Wallet sender, string to, decimal amount, decimal fee)
+bool running = true;
+while (running)
 {
-    var tx = new Transaction(sender.PublicKey, to, amount, fee);
-    TransactionService.SignTransaction(tx, sender.PrivateKey);
-    return tx;
+    PrintMenu();
+    string input = Console.ReadLine()?.Trim() ?? string.Empty;
+
+    switch (input)
+    {
+        case "1":
+            HandleAddTransaction();
+            break;
+        case "2":
+            HandleMineBlock();
+            break;
+        case "3":
+            HandlePrintChain();
+            break;
+        case "4":
+            HandleValidate();
+            break;
+        case "5":
+            HandleCreateWallet();
+            break;
+        case "6":
+            HandleCheckBalance();
+            break;
+        case "7":
+            HandleShowPending();
+            break;
+        case "8":
+            HandleAnalyzeChain();
+            break;
+        case "0":
+            running = false;
+            Console.WriteLine("Exiting. Goodbye.");
+            break;
+        default:
+            Console.WriteLine("Unknown option. Please try again.");
+            break;
+    }
 }
 
-// ── Fund miner ────────────────────────────────────────────────────────────
-for (int i = 0; i < 8; i++)
-    blockChainService.MineBlock(miner1.PublicKey); // 8 × 50 = 400
+// --- Menu printer ---
 
-blockChainService.AddTransactionToMempool(Signed(miner1, alice.PublicKey, 150m, fee: 1m));
-blockChainService.AddTransactionToMempool(Signed(miner1, charlie.PublicKey, 150m, fee: 1m));
-blockChainService.MineBlock(miner1.PublicKey);
-
-Console.WriteLine($"\nAfter funding:");
-Console.WriteLine($"  Alice:   {blockChainService.GetBalance(alice.PublicKey)}");
-Console.WriteLine($"  Charlie: {blockChainService.GetBalance(charlie.PublicKey)}");
-Console.WriteLine($"  Miner1:  {blockChainService.GetBalance(miner1.PublicKey)}");
-
-// ── Demo 1: Fee below NetworkBaseFee rejected ─────────────────────────────
-Console.WriteLine("\n=== DEMO 1: Fee below NetworkBaseFee is rejected ===");
-var lowFeeTx = new Transaction(alice.PublicKey, bob.PublicKey, 10m, fee: 0.5m);
-TransactionService.SignTransaction(lowFeeTx, alice.PrivateKey);
-blockChainService.AddTransactionToMempool(lowFeeTx);
-Console.WriteLine($"Pending after low-fee attempt: {blockChainService.PendingTransactions.Count} (expected 0)");
-
-// ── Demo 2: Tip priority ordering ────────────────────────────────────────
-Console.WriteLine("\n=== DEMO 2: Tip priority ordering ===");
-blockChainService.AddTransactionToMempool(Signed(alice, bob.PublicKey, 10m, fee: 1m)); // tip = 0
-blockChainService.AddTransactionToMempool(Signed(alice, bob.PublicKey, 10m, fee: 5m)); // tip = 4
-blockChainService.AddTransactionToMempool(Signed(charlie, bob.PublicKey, 10m, fee: 3m)); // tip = 2
-
-Console.WriteLine("Queued: alice fee=1 (tip=0), alice fee=5 (tip=4), charlie fee=3 (tip=2)");
-Console.WriteLine($"Pending: {blockChainService.PendingTransactions.Count} (expected 3)");
-
-decimal minerBefore = blockChainService.GetBalance(miner1.PublicKey);
-blockChainService.MineBlock(miner1.PublicKey);
-decimal minerAfter = blockChainService.GetBalance(miner1.PublicKey);
-
-var tipBlock = blockChainService.Chain.Last();
-var coinbase = tipBlock.Transactions.First(t => t.From == "COINBASE");
-Console.WriteLine($"\nCoinbase reward: {coinbase.Amount} (expected 56 = 50 base + tips 4+2+0)");
-Console.WriteLine($"Miner earned:    {minerAfter - minerBefore} (expected 56)");
-
-Console.WriteLine("\nBlock transactions ordered by tip desc:");
-foreach (var tx in tipBlock.Transactions.Where(t => t.From != "COINBASE"))
+void PrintMenu()
 {
-    decimal tip = tx.Fee - blockChainService.NetworkBaseFee;
-    Console.WriteLine($"  Amount: {tx.Amount}, Fee: {tx.Fee}, Tip: {tip}, Burned: {blockChainService.NetworkBaseFee}");
+    Console.WriteLine();
+    Console.WriteLine("=== Blockchain Menu ===");
+    Console.WriteLine("[1] Add transaction to pending list");
+    Console.WriteLine("[2] Mine block (includes all pending transactions)");
+    Console.WriteLine("[3] Print blockchain");
+    Console.WriteLine("[4] Validate chain (IsChainValid)");
+    Console.WriteLine("[5] Create new wallet");
+    Console.WriteLine("[6] Check wallet balance");
+    Console.WriteLine("[7] Show pending transactions");
+    Console.WriteLine("[8] Analyze chain (detailed error report)");
+    Console.WriteLine("[0] Exit");
+    Console.Write("Choose: ");
 }
 
-// ── Demo 3: Burn audit ────────────────────────────────────────────────────
-Console.WriteLine("\n=== DEMO 3: Burned fees audit ===");
-var explorer = new BlockChainExplorer(blockChainService);
+// --- Option handlers ---
 
-decimal burned = explorer.GetTotalBurnedFees();
-decimal emitted = blockChainService.GetTotalSupply();
-decimal actualSupply = explorer.GetActualTotalSupply();
-
-int nonCoinbaseTxCount = blockChainService.Chain
-    .Skip(1)
-    .SelectMany(b => b.Transactions)
-    .Count(t => t.From != "COINBASE");
-
-Console.WriteLine($"Non-coinbase tx count:           {nonCoinbaseTxCount}");
-Console.WriteLine($"Total emitted (COINBASE sum):    {emitted}");
-Console.WriteLine($"Total burned (BaseFee × txs):   {burned} (expected {nonCoinbaseTxCount} × {blockChainService.NetworkBaseFee} = {nonCoinbaseTxCount * blockChainService.NetworkBaseFee})");
-Console.WriteLine($"Actual supply in circulation:   {actualSupply} (emitted - burned)");
-
-decimal walletSum = blockChainService.GetBalance(alice.PublicKey)
-                  + blockChainService.GetBalance(bob.PublicKey)
-                  + blockChainService.GetBalance(charlie.PublicKey)
-                  + blockChainService.GetBalance(miner1.PublicKey);
-
-Console.WriteLine($"\nWallet balances:");
-Console.WriteLine($"  Alice:   {blockChainService.GetBalance(alice.PublicKey)}");
-Console.WriteLine($"  Bob:     {blockChainService.GetBalance(bob.PublicKey)}");
-Console.WriteLine($"  Charlie: {blockChainService.GetBalance(charlie.PublicKey)}");
-Console.WriteLine($"  Miner1:  {blockChainService.GetBalance(miner1.PublicKey)}");
-Console.WriteLine($"  Sum:     {walletSum}");
-
-// Burned fees left wallets but exist in no wallet — correct invariant is:
-// walletSum + burned == actualSupply  (i.e. all coins are either held or burned)
-Console.WriteLine($"\nAccounting invariant (walletSum + burned == actualSupply):");
-Console.WriteLine($"  {walletSum} + {burned} = {walletSum + burned} == {actualSupply} → {walletSum + burned == actualSupply}");
-
-// ── Demo 4: Per-block breakdown ───────────────────────────────────────────
-Console.WriteLine("\n=== DEMO 4: Per-block fee breakdown ===");
-foreach (var block in blockChainService.Chain.Skip(1))
+void HandleCreateWallet()
 {
-    var nonCoinbaseTxs = block.Transactions.Where(t => t.From != "COINBASE").ToList();
-    var cb = block.Transactions.FirstOrDefault(t => t.From == "COINBASE");
-    decimal totalFeePaid = nonCoinbaseTxs.Sum(t => t.Fee);
-    decimal blockBurned = nonCoinbaseTxs.Count * blockChainService.NetworkBaseFee;
-    decimal blockTips = nonCoinbaseTxs.Sum(t => t.Fee - blockChainService.NetworkBaseFee);
-    decimal cbAmount = cb?.Amount ?? 0;
-    decimal baseMiningReward = cbAmount - blockTips;
-    Console.WriteLine($"  Block {block.Index,2}: txs={nonCoinbaseTxs.Count}, " +
-                      $"feePaid={totalFeePaid}, burned={blockBurned}, " +
-                      $"tips={blockTips}, coinbase={cbAmount} " +
-                      $"(base {baseMiningReward} + tips {blockTips})");
+    Console.Write("Enter a name/label for this wallet: ");
+    string label = Console.ReadLine()?.Trim() ?? string.Empty;
+
+    if (string.IsNullOrWhiteSpace(label))
+    {
+        Console.WriteLine("Wallet label cannot be empty.");
+        return;
+    }
+
+    if (wallets.ContainsKey(label))
+    {
+        Console.WriteLine($"A wallet with label '{label}' already exists.");
+        return;
+    }
+
+    var wallet = new Wallet(cryptoService);
+    wallets[label] = wallet;
+    Console.WriteLine($"Wallet '{label}' created.");
+    Console.WriteLine($"  Public key (short): {wallet.PublicKey[..24]}...");
 }
 
-// ── Demo 5: Find transaction by ID ───────────────────────────────────────
-Console.WriteLine("\n=== DEMO 5: Find transaction by ID ===");
-var targetTx = tipBlock.Transactions.First(t => t.From != "COINBASE");
-var (foundBlock, foundTx) = explorer.FindTransactionLocation(targetTx.Id);
-Console.WriteLine($"Searched for tx ID: {targetTx.Id}");
-Console.WriteLine($"Found in block:     {foundBlock?.Index} (expected {tipBlock.Index})");
-Console.WriteLine($"Amount: {foundTx?.Amount}, Fee: {foundTx?.Fee}, Tip: {foundTx?.Fee - blockChainService.NetworkBaseFee}");
-
-// ── Demo 6: Address history ───────────────────────────────────────────────
-Console.WriteLine("\n=== DEMO 6: Alice's transaction history ===");
-var aliceHistory = explorer.GetAddressHistory(alice.PublicKey);
-foreach (var tx in aliceHistory)
+void HandleAddTransaction()
 {
-    string direction = tx.From == alice.PublicKey ? "SENT" : "RECV";
-    Console.WriteLine($"  [{direction}] Amount: {tx.Amount}, Fee: {tx.Fee}, Tip: {tx.Fee - blockChainService.NetworkBaseFee}");
+    if (wallets.Count == 0)
+    {
+        Console.WriteLine("No wallets available. Create at least two wallets first (option [5]).");
+        return;
+    }
+
+    Console.WriteLine("Available wallets: " + string.Join(", ", wallets.Keys));
+
+    Console.Write("Sender wallet label: ");
+    string senderLabel = Console.ReadLine()?.Trim() ?? string.Empty;
+
+    if (!wallets.TryGetValue(senderLabel, out Wallet? senderWallet))
+    {
+        Console.WriteLine($"Wallet '{senderLabel}' not found.");
+        return;
+    }
+
+    Console.Write("Recipient wallet label: ");
+    string recipientLabel = Console.ReadLine()?.Trim() ?? string.Empty;
+
+    if (!wallets.TryGetValue(recipientLabel, out Wallet? recipientWallet))
+    {
+        Console.WriteLine($"Wallet '{recipientLabel}' not found.");
+        return;
+    }
+
+    if (senderLabel.Equals(recipientLabel, StringComparison.OrdinalIgnoreCase))
+    {
+        Console.WriteLine("Sender and recipient cannot be the same wallet.");
+        return;
+    }
+
+    Console.Write($"Amount (network base fee is {blockChainService.NetworkBaseFee}): ");
+    if (!decimal.TryParse(Console.ReadLine()?.Trim(), out decimal amount) || amount <= 0)
+    {
+        Console.WriteLine("Invalid amount. Must be a positive number.");
+        return;
+    }
+
+    Console.Write($"Fee (minimum {blockChainService.NetworkBaseFee}): ");
+    if (!decimal.TryParse(Console.ReadLine()?.Trim(), out decimal fee) || fee < 0)
+    {
+        Console.WriteLine("Invalid fee. Must be a non-negative number.");
+        return;
+    }
+
+    try
+    {
+        var tx = new Transaction(senderWallet.PublicKey, recipientWallet.PublicKey, amount, fee);
+        TransactionService.SignTransaction(tx, senderWallet.PrivateKey);
+        pendingTransactions.Add(tx);
+        Console.WriteLine($"Transaction added to pending list: {senderLabel} -> {recipientLabel}, amount={amount}, fee={fee}");
+        Console.WriteLine($"Pending count: {pendingTransactions.Count}");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Failed to create transaction: {ex.Message}");
+    }
 }
-Console.WriteLine($"Total txs involving Alice: {aliceHistory.Count}");
 
-// ── Demo 7: Largest transaction ───────────────────────────────────────────
-Console.WriteLine("\n=== DEMO 7: Largest transaction ===");
-var largest = explorer.GetLargestTransaction();
-Console.WriteLine($"Largest tx: Amount={largest?.Amount}, Fee={largest?.Fee}");
-Console.WriteLine($"  From: {(largest?.From == "COINBASE" ? "COINBASE" : largest?.From[..20] + "...")}");
-Console.WriteLine($"  To:   {largest?.To[..20]}...");
+void HandleMineBlock()
+{
+    if (wallets.Count == 0)
+    {
+        Console.WriteLine("No wallets available. Create a miner wallet first (option [5]).");
+        return;
+    }
 
-Console.WriteLine("\n=== GAP DIAGNOSTIC ===");
-decimal totalSentByUsers = blockChainService.Chain.Skip(1)
-    .SelectMany(b => b.Transactions)
-    .Where(t => t.From != "COINBASE")
-    .Sum(t => t.Amount + t.Fee);
+    Console.WriteLine("Available wallets: " + string.Join(", ", wallets.Keys));
+    Console.Write("Miner wallet label: ");
+    string minerLabel = Console.ReadLine()?.Trim() ?? string.Empty;
 
-decimal totalReceivedByUsers = blockChainService.Chain.Skip(1)
-    .SelectMany(b => b.Transactions)
-    .Where(t => t.From != "COINBASE")
-    .Sum(t => t.Amount);
+    if (!wallets.TryGetValue(minerLabel, out Wallet? minerWallet))
+    {
+        Console.WriteLine($"Wallet '{minerLabel}' not found.");
+        return;
+    }
 
-decimal totalCoinbase = blockChainService.GetTotalSupply();
+    // Add pending transactions to the mempool before mining
+    int accepted = 0;
+    int rejected = 0;
+    foreach (var tx in pendingTransactions)
+    {
+        int beforeCount = blockChainService.PendingTransactions.Count;
+        blockChainService.AddTransactionToMempool(tx);
+        if (blockChainService.PendingTransactions.Count > beforeCount)
+            accepted++;
+        else
+            rejected++;
+    }
 
-Console.WriteLine($"Total sent by users (amount+fee): {totalSentByUsers}");
-Console.WriteLine($"Total received by users (amount): {totalReceivedByUsers}");
-Console.WriteLine($"Total coinbase emitted:           {totalCoinbase}");
-Console.WriteLine($"Fee paid total:                   {totalSentByUsers - totalReceivedByUsers}");
-Console.WriteLine($"Tips to miners:                   {totalSentByUsers - totalReceivedByUsers - burned}");
-Console.WriteLine($"Expected wallet sum:              {totalCoinbase - burned}");
-Console.WriteLine($"Actual wallet sum:                {walletSum}");
-Console.WriteLine($"Difference:                       {totalCoinbase - burned - walletSum}");
+    pendingTransactions.Clear();
+    Console.WriteLine($"Submitted {accepted + rejected} transaction(s) to mempool: {accepted} accepted, {rejected} rejected.");
+
+    Console.WriteLine("Mining block... (this may take a moment)");
+    blockChainService.MineBlock(minerWallet.PublicKey);
+
+    var newBlock = blockChainService.Chain.Last();
+    Console.WriteLine($"Block #{newBlock.Index} mined. Hash: {newBlock.Hash[..16]}...");
+    Console.WriteLine($"Transactions in block: {newBlock.Transactions.Count}");
+}
+
+void HandlePrintChain()
+{
+    Console.WriteLine($"\n=== Blockchain ({blockChainService.Chain.Count} blocks) ===");
+    foreach (var block in blockChainService.Chain)
+    {
+        Console.WriteLine($"  Block #{block.Index}");
+        Console.WriteLine($"    Hash:     {block.Hash[..16]}...");
+        Console.WriteLine($"    PrevHash: {block.PreviousHash[..Math.Min(16, block.PreviousHash.Length)]}...");
+        Console.WriteLine($"    Txs:      {block.Transactions.Count}");
+        Console.WriteLine($"    Difficulty at mining: {block.DifficultyAtMining:F2}");
+    }
+}
+
+void HandleValidate()
+{
+    bool valid = blockChainService.IsChainValid();
+    Console.WriteLine(valid
+        ? "Chain is valid."
+        : "Chain is INVALID. Use option [8] for a detailed report.");
+}
+
+void HandleCheckBalance()
+{
+    if (wallets.Count == 0)
+    {
+        Console.WriteLine("No wallets available.");
+        return;
+    }
+
+    Console.WriteLine("Available wallets: " + string.Join(", ", wallets.Keys));
+    Console.Write("Wallet label: ");
+    string label = Console.ReadLine()?.Trim() ?? string.Empty;
+
+    if (!wallets.TryGetValue(label, out Wallet? wallet))
+    {
+        Console.WriteLine($"Wallet '{label}' not found.");
+        return;
+    }
+
+    decimal balance = blockChainService.GetBalance(wallet.PublicKey);
+    Console.WriteLine($"Balance of '{label}': {balance}");
+}
+
+void HandleShowPending()
+{
+    if (pendingTransactions.Count == 0)
+    {
+        Console.WriteLine("No pending transactions in local list.");
+    }
+    else
+    {
+        Console.WriteLine($"Pending transactions ({pendingTransactions.Count}):");
+        foreach (var tx in pendingTransactions)
+        {
+            Console.WriteLine($"  {tx.From[..16]}... -> {tx.To[..16]}..., amount={tx.Amount}, fee={tx.Fee}");
+        }
+    }
+
+    if (blockChainService.PendingTransactions.Count > 0)
+    {
+        Console.WriteLine($"Mempool (not yet mined): {blockChainService.PendingTransactions.Count} transaction(s)");
+    }
+}
+
+void HandleAnalyzeChain()
+{
+    Console.WriteLine("\n=== Chain analysis ===");
+    var errors = blockChainService.AnalyzeChain();
+    if (errors.Count == 0)
+        Console.WriteLine("No errors detected. Chain is healthy.");
+    else
+        Console.WriteLine($"Total errors found: {errors.Count}");
+}
