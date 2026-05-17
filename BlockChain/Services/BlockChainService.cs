@@ -174,6 +174,58 @@ namespace BlockChain.HashingService
             return true; // If all blocks are valid, return true
         }
 
+        public List<string> AnalyzeChain()
+        {
+            var errors = new List<string>();
+
+            for (int i = 1; i < Chain.Count; i++)
+            {
+                Block currentBlock = Chain[i];
+                Block previousBlock = Chain[i - 1];
+
+                // hsah doesn't match data
+                string expectedHash = HashingService.ComputeHash(currentBlock);
+                if (currentBlock.Hash != expectedHash)
+                {
+                    errors.Add($"error in block{currentBlock.Index}: " +
+                               $"hash doesent meed data (Data/Timestamp/Nonce changed). " +
+                               $"Expected: {expectedHash[..12]}... Found: {currentBlock.Hash[..Math.Min(12, currentBlock.Hash.Length)]}...");
+                }
+
+                // doesn't meet difficulty
+                int wholePart = (int)currentBlock.DifficultyAtMining;
+                double fraction = currentBlock.DifficultyAtMining - wholePart;
+                string hexChars = "0123456789abcdef";
+                char fractionalChar = hexChars[15 - Math.Min(15, (int)(fraction * 16))];
+
+                bool meetsLeadingZeros = currentBlock.Hash.Length > wholePart &&
+                                         currentBlock.Hash.StartsWith(new string('0', wholePart));
+                bool meetsFractional = meetsLeadingZeros && currentBlock.Hash[wholePart] <= fractionalChar;
+
+                if (!meetsLeadingZeros || !meetsFractional)
+                {
+                    errors.Add($"errror in block {currentBlock.Index}: " +
+                               $"Hash does not meet current difficulty (Difficulty = {currentBlock.DifficultyAtMining:F2}). " +
+                               $"Hash: {currentBlock.Hash[..Math.Min(16, currentBlock.Hash.Length)]}...");
+                }
+
+                // broken chain
+                if (currentBlock.PreviousHash != previousBlock.Hash)
+                {
+                    errors.Add($"error in block {currentBlock.Index}: " +
+                               $"Broke chain (PreviousHash doesnt match with {currentBlock.PreviousHash}). " +
+                               $"Expected: {previousBlock.Hash[..12]}... Found: {currentBlock.PreviousHash[..Math.Min(12, currentBlock.PreviousHash.Length)]}...");
+                }
+            }
+
+            if (errors.Count == 0)
+                Console.WriteLine("Everything's fine with chain");
+            else
+                errors.ForEach(e => Console.WriteLine($"error {e}"));
+
+            return errors;
+        }
+
         public decimal GetBalance(string publicKey)
         {
             if (Balances.ContainsKey(publicKey))
