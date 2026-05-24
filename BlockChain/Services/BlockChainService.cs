@@ -18,7 +18,7 @@ namespace BlockChain.HashingService
 
         public List<Transaction> PendingTransactions = new List<Transaction>(); // List to hold pending transactions that have not yet been included in a block
 
-        private readonly double _targetMiningTime = 2.5; // Target mining time in seconds for dynamic difficulty adjustment
+        private readonly double _targetMiningTime = 5; // Target mining time in seconds for dynamic difficulty adjustment
         private readonly int difficultyAdjustmentInterval = 10; // Amount to adjust the difficulty by when mining time is too short or too long
         private readonly int _rateLimitPerSender = 3; // Maximum number of pending transactions allowed per sender to prevent spamming
         private readonly int _ttlTransactionsSeconds = 10; // Time-to-live for transactions in the mempool (not currently implemented, but could be used to remove old transactions)
@@ -42,21 +42,21 @@ namespace BlockChain.HashingService
         public void AddTransactionToMempool(Transaction transaction)
         {
 
-            if(transaction.Fee < NetworkBaseFee)
+            if (transaction.Fee < NetworkBaseFee)
             {
                 Console.WriteLine($"Transaction from {transaction.From} rejected: Fee {transaction.Fee} is below the network base fee of {NetworkBaseFee}.");
                 return;
             }
 
-            if (transaction.From !="COINBASE")
+            if (transaction.From != "COINBASE")
             {
                 var balance = GetBalance(transaction.From);
                 var totalPendingAmount = PendingTransactions.Where(x => x.From == transaction.From).Sum(x => x.Amount + x.Fee);
-                if (balance < totalPendingAmount + transaction.Amount + transaction.Fee)
-                {
-                    Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient funds.");
-                    return;
-                }
+                //if (balance < totalPendingAmount + transaction.Amount + transaction.Fee)
+                //{
+                //    Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient funds.");
+                //    return;
+                //}
             }
 
             var isValid = TransactionService.ValidateTransaction(transaction); // Validate the transaction using the TransactionService
@@ -148,30 +148,61 @@ namespace BlockChain.HashingService
             Console.WriteLine($"Median: {medianMiningTime:F2}s, Target: {_targetMiningTime}s, Difficulty adjusted from {oldDifficulty:F2} to {Difficulty:F2}");
         }
 
-        public bool IsChainValid()
+        public bool IsChainValid() => IsChainValid(Chain);
+
+        public bool IsChainValid(List<Block> chain)
         {
-            for (int i = 1; i < Chain.Count; i++)
+            // 1. Empty or missing genesis is invalid
+            if (chain == null || chain.Count == 0) return false;
+
+            // 2. Genesis must match ours — otherwise this is a foreign chain,
+            //    not a fork of the same network
+            if (chain[0].Hash != Chain[0].Hash) return false;
+
+            // 3. Walk every non-genesis block
+            for (int i = 1; i < chain.Count; i++)
             {
-                Block currentBlock = Chain[i];
-                Block previousBlock = Chain[i - 1];
-                if (currentBlock.Hash != HashingService.ComputeHash(currentBlock)) // Check if the current block's hash is valid
-                {
-                    return false;
-                }
-                if (currentBlock.PreviousHash != previousBlock.Hash) // Check if the current block's previous hash matches the previous block's hash
-                {
-                    return false;
-                }
+                Block currentBlock = chain[i];
+                Block previousBlock = chain[i - 1];
+
+                // a. Index must be sequential
+                if (currentBlock.Index != previousBlock.Index + 1) return false;
+
+                // b. Hash must match the block's actual contents (no tampering)
+                if (currentBlock.Hash != HashingService.ComputeHash(currentBlock)) return false;
+
+                // c. PreviousHash must link to the previous block (no gaps / swaps)
+                if (currentBlock.PreviousHash != previousBlock.Hash) return false;
+
+                // d. Hash must meet the difficulty target that was declared at mining
                 int wholePart = (int)currentBlock.DifficultyAtMining;
                 double fraction = currentBlock.DifficultyAtMining - wholePart;
                 string hexChars = "0123456789abcdef";
                 char fractionalChar = hexChars[15 - Math.Min(15, (int)(fraction * 16))];
-                if (!currentBlock.Hash.StartsWith(new string('0', wholePart)) || currentBlock.Hash[wholePart] > fractionalChar) // Check if the current block's hash meets the difficulty requirement
+
+                if (currentBlock.Hash.Length <= wholePart) return false;
+                if (!currentBlock.Hash.StartsWith(new string('0', wholePart))) return false;
+                if (currentBlock.Hash[wholePart] > fractionalChar) return false;
+
+                // e. Every non-coinbase transaction must have a valid signature
+                int coinbaseCount = 0;
+                foreach (var tx in currentBlock.Transactions)
                 {
-                    return false;
+                    if (tx.From == "COINBASE")
+                    {
+                        coinbaseCount++;
+                        continue; // coinbase has no signature to verify
+                    }
+
+                    var (isValid, _) = TransactionService.ValidateTransaction(tx);
+                    if (!isValid) return false;
                 }
+
+                // f. Exactly one coinbase per block (no double-rewarding)
+                if (coinbaseCount != 1) return false;
             }
-            return true; // If all blocks are valid, return true
+
+            return true;
         }
 
         public List<string> AnalyzeChain()
@@ -370,6 +401,146 @@ namespace BlockChain.HashingService
             {
                 Console.WriteLine($"Error loading chain from file: {ex.Message}");
             }
+        }
+
+        private void RevertBalances(Block block)
+        {
+            foreach (Transaction transaction in block.Transactions)
+            {
+                if (transaction.From != "COINBASE")
+                {
+                    if (!Balances.ContainsKey(transaction.From))
+                        Balances[transaction.From] = 0;
+
+                    // Undo the deduction: give the sender back what they spent
+                    Balances[transaction.From] += (transaction.Amount + transaction.Fee);
+                }
+
+                if (!Balances.ContainsKey(transaction.To))
+                    Balances[transaction.To] = 0;
+
+                // Undo the credit: take back what the recipient received
+                Balances[transaction.To] -= transaction.Amount;
+            }
+        }
+
+        public void ReplaceChain(List<Block> newChain)
+        {
+            if (newChain.Count <= Chain.Count) return;
+            if (!IsChainValid(newChain)) return;
+            if (newChain.Sum(x => x.DifficultyAtMining) <= Chain.Sum(x => x.DifficultyAtMining)) return;
+
+            int forkIndex = FindForkIndex(Chain, newChain);
+
+            var revertedBlocks = Chain.Skip(forkIndex).ToList(); // leaving the chain
+            var addedBlocks = newChain.Skip(forkIndex).ToList(); // joining the chain
+
+            var transactionsWereAboutToHappen = revertedBlocks.SelectMany(b => b.Transactions).Where(t => t.From != "COINBASE").ToList();
+            var tranactionsHappenedInNewChain = addedBlocks.SelectMany(b => b.Transactions).Where(t => t.From != "COINBASE").ToList();
+
+            var transactionsLost = transactionsWereAboutToHappen.Where(t => !tranactionsHappenedInNewChain.Any(nt => nt.Id == t.Id)).ToList();
+
+            var prev = Console.ForegroundColor;
+            Console.ForegroundColor = ConsoleColor.Red;
+            foreach (var tx in transactionsLost)
+            {
+                Console.WriteLine($"[ALARM] Transaction {tx.Id} was lost due to reorg!");
+            }
+            Console.ForegroundColor = prev;
+
+            prev = Console.ForegroundColor;
+            Console.ForegroundColor = ConsoleColor.Blue;
+            Console.WriteLine($"[AUDIT] Our chain has been leaving for {revertedBlocks.Count} in past!");
+            Console.ForegroundColor = prev;
+
+            Console.WriteLine($"Reorg: reverting {revertedBlocks.Count} block(s), applying {addedBlocks.Count} block(s).");
+
+            var userBalancesSnapshot = new Dictionary<string, decimal>(Balances); // snapshot before reorg for auditing
+
+            // 1. Revert old blocks in REVERSE order (tip → fork)
+            for (int i = revertedBlocks.Count - 1; i >= 0; i--)
+            {
+                RevertBalances(revertedBlocks[i]);
+            }
+
+            // 2. Apply new blocks in FORWARD order (fork → tip)
+            foreach (var block in addedBlocks)
+            {
+                UpdateBalances(block);
+            }
+
+            prev = Console.ForegroundColor;
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            foreach (var balance in Balances)
+            {
+                decimal oldBalance = userBalancesSnapshot.ContainsKey(balance.Key) ? userBalancesSnapshot[balance.Key] : 0;
+                if (balance.Value < oldBalance)
+                {
+                    Console.WriteLine($"[BALANCE AUDIT] Attention! User {balance.Key} has lost {oldBalance - balance.Value} coins afetr network backup!");
+                    
+                }
+            }
+            Console.ForegroundColor = prev;
+
+            // 3. Put unconfirmed txs from reverted blocks back into the mempool
+            //    (skip COINBASE rewards and txs already included in the new chain)
+            var addedTxIds = addedBlocks
+                .SelectMany(b => b.Transactions)
+                .Select(t => t.Id)
+                .ToHashSet();
+
+            foreach (var block in revertedBlocks)
+            {
+                foreach (var tx in block.Transactions)
+                {
+                    if (tx.From == "COINBASE") continue;
+                    if (addedTxIds.Contains(tx.Id)) continue;
+                    PendingTransactions.Add(tx);
+                }
+            }
+
+            // 4. Remove from the mempool any txs that are now confirmed in the new chain
+            PendingTransactions.RemoveAll(tx => addedTxIds.Contains(tx.Id));
+
+            Chain = newChain;
+        }
+        
+        private static int FindForkIndex(List<Block> oldChain, List<Block> newChain)
+        {
+            int min = Math.Min(oldChain.Count, newChain.Count);
+            for (int i = 0; i < min; i++)
+            {
+                if (oldChain[i].Hash != newChain[i].Hash)
+                    return i;
+            }
+            return min; // one chain is a strict prefix of the other — no real fork
+        }
+
+        // Add this to BlockChainService
+        public BlockChainService Clone()
+        {
+            var clone = new BlockChainService(); // builds with a fresh genesis
+
+            var options = new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+            };
+
+            // Deep-copy the chain via JSON round-trip
+            string chainJson = JsonSerializer.Serialize(Chain, options);
+            clone.Chain = JsonSerializer.Deserialize<List<Block>>(chainJson, options) ?? new List<Block>();
+
+            // Deep-copy mempool
+            string mempoolJson = JsonSerializer.Serialize(PendingTransactions, options);
+            clone.PendingTransactions = JsonSerializer.Deserialize<List<Transaction>>(mempoolJson, options)
+                                        ?? new List<Transaction>();
+
+            clone.Difficulty = Difficulty;
+            clone.NetworkBaseFee = NetworkBaseFee;
+            clone.RebuildState(); // rebuild Balances from the copied chain
+
+            return clone;
         }
     }
 }

@@ -1,164 +1,280 @@
 ﻿using BlockChain.HashingService;
 using BlockChain.Model;
 using BlockChain.Services;
+using BlockChain.Services.P2P;
+using Microsoft.Extensions.DependencyInjection;
 
-var blockChainService = new BlockChainService();
-var cryptoService = new CryptoService();
+var service = new ServiceCollection();
+service.AddSingleton<BlockChainService>();
+service.AddSingleton<CryptoService>();
+service.AddSingleton<P2PClient>();
+service.AddSingleton<DisplayService>();
+service.AddSingleton<P2PServer>();
 
-var alice = new Wallet(cryptoService);
-var bob = new Wallet(cryptoService);
-var charlie = new Wallet(cryptoService);
-var miner1 = new Wallet(cryptoService);
+var provider = service.BuildServiceProvider();
 
-Console.WriteLine($"Network Base Fee: {blockChainService.NetworkBaseFee}");
+var blockChainService = provider.GetRequiredService<BlockChainService>();
+var p2pServer = provider.GetRequiredService<P2PServer>();
+var p2pClient = provider.GetRequiredService<P2PClient>();
+var cryptoService = provider.GetRequiredService<CryptoService>();
+var displayService = provider.GetRequiredService<DisplayService>();
 
-Transaction Signed(Wallet sender, string to, decimal amount, decimal fee)
+var myWallet = new Wallet(cryptoService);
+
+// TASK 1
+
+// Mine few bloacks to get value
+//blockChainService.MineBlock(myWallet.PublicKey);
+//blockChainService.MineBlock(myWallet.PublicKey);
+//blockChainService.MineBlock(myWallet.PublicKey);
+
+//var myBalance = blockChainService.GetBalance(myWallet.PublicKey);
+
+//Console.WriteLine($"Your wallet balance after mining few blocks: {myBalance}");
+
+
+
+//BlockChainService newChain = blockChainService.Clone();
+
+//Console.WriteLine("Initial chain:");
+//displayService.DisplayChain(blockChainService);
+
+//newChain.MineBlock("HACKER");
+//newChain.MineBlock("HACKER");
+
+//Console.WriteLine("HACKER CHAIN:");
+//displayService.DisplayChain(newChain);
+
+//blockChainService.MineBlock(myWallet.PublicKey);
+
+//Console.WriteLine("USER CHAIN:");
+//displayService.DisplayChain(blockChainService);
+
+//Console.WriteLine("Replacing chain with HACKER chain...");
+//blockChainService.ReplaceChain(newChain.Chain);
+
+//Console.WriteLine("USER CHAIN after replacement:");
+//displayService.DisplayChain(blockChainService);
+
+
+Console.WriteLine($"Your wallet address (public key): {myWallet.PublicKey}");
+Console.WriteLine("Enter port of P2P server:");
+
+if (!int.TryParse(Console.ReadLine(), out int port))
+    port = 5001;
+
+p2pServer.Start(port);
+
+bool flag = true;
+
+while (flag)
 {
-    var tx = new Transaction(sender.PublicKey, to, amount, fee);
-    TransactionService.SignTransaction(tx, sender.PrivateKey);
-    return tx;
+    Console.WriteLine("\nMain menu:");
+    Console.WriteLine("1 - Connect to another node");
+    Console.WriteLine("2 - Create and broadcast a transaction");
+    Console.WriteLine("3 - Show mem-pool");
+    Console.WriteLine("4 - Mine block");
+    Console.WriteLine("5 - See block chain");
+    Console.WriteLine("6 - Balance");
+    Console.WriteLine("7 - Exit");
+    Console.Write("Enter your choice: ");
+
+    switch (Console.ReadLine())
+    {
+        case "1":
+
+            Console.WriteLine("Enter the address of the peer to connect to (e.g., 127.0.0.1:5001):");
+            var nodeAddress = Console.ReadLine();
+            if (string.IsNullOrWhiteSpace(nodeAddress) || !nodeAddress.Contains(':'))
+            {
+                Console.WriteLine("Invalid address format. Please use IP:Port format.");
+                break;
+            }
+            p2pClient.ConnectAsync(nodeAddress);
+            break;
+
+        case "2":
+            Console.Write("Enter an address of receiver: ");
+            var toAddress = Console.ReadLine();
+
+            Console.Write("Enter the amount to send: ");
+            if (!decimal.TryParse(Console.ReadLine(), out decimal amount))
+            {
+                Console.WriteLine("Invalid amount.");
+                break;
+            }
+
+            Console.Write("Enter the fee: ");
+            if (!decimal.TryParse(Console.ReadLine(), out decimal fee))
+            {
+                Console.WriteLine("Invalid fee.");
+                break;
+            }
+
+            try
+            {
+                var transaction = TransactionService.CreateTransaction(myWallet.PublicKey, toAddress, amount, fee);
+                TransactionService.SignTransaction(transaction, myWallet.PrivateKey);
+                blockChainService.AddTransactionToMempool(transaction);
+                await p2pClient.BroadcastTransactionAsync(transaction);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error creating transaction: {ex.Message}");
+            }
+            break;
+
+        case "3":
+            if (blockChainService.PendingTransactions.Count == 0)
+            {
+                Console.WriteLine("Mem-pool is empty.");
+                break;
+            }
+            Console.WriteLine($"Mem-pool ({blockChainService.PendingTransactions.Count} transactions):");
+            foreach (var tx in blockChainService.PendingTransactions)
+                Console.WriteLine($"  {tx.From[..16]}... -> {tx.To[..16]}..., amount={tx.Amount}, fee={tx.Fee}");
+            break;
+
+
+        case "4":
+            blockChainService.MineBlock(myWallet.PublicKey);
+            break;
+
+        case "5":
+            displayService.DisplayChain(blockChainService);
+            break;
+
+        case "6":
+            var balance = blockChainService.GetBalance(myWallet.PublicKey);
+            Console.WriteLine($"Your balance: {balance}");
+            break;
+
+        case "7":
+            Console.WriteLine("Exiting...");
+            flag = false;
+            break;
+
+        case "9":
+            Console.WriteLine("\n=================================================");
+            Console.WriteLine("  FORK AUDITOR — Симуляція мережевого розколу");
+            Console.WriteLine("=================================================");
+
+            // ── Phase 1: Build shared history ────────────────────────────────
+            Console.WriteLine("\n[Phase 1] Building shared history on both chains...");
+            blockChainService.MineBlock(myWallet.PublicKey); // ensure user has funds
+
+            Console.WriteLine($"Chain length:   {blockChainService.Chain.Count}");
+            Console.WriteLine($"Your balance:   {blockChainService.GetBalance(myWallet.PublicKey)}");
+
+            // ── Phase 2: Clone at fork point ─────────────────────────────────
+            // fakeNode and blockChainService now share IDENTICAL history
+            Console.WriteLine("\n[Phase 2] Cloning chain — this is the fork moment...");
+            var fakeNode9 = blockChainService.Clone();
+            Console.WriteLine($"Fork point: both chains share {blockChainService.Chain.Count} blocks.");
+            Console.WriteLine($"Genesis match: {fakeNode9.Chain[0].Hash == blockChainService.Chain[0].Hash}");
+
+            // ── Phase 3: User side — create real transactions, mine them ─────
+            // These transactions will end up ONLY in the user's fork.
+            // After the reorg they will be erased → triggers Task 3.
+            Console.WriteLine("\n[Phase 3] User side: injecting real transactions into our fork...");
+
+            var aliceAddress = "Alice_ReceiverWallet";
+            var bobAddress = "Bob_ReceiverWallet";
+
+            var tx9a = TransactionService.CreateTransaction(myWallet.PublicKey, aliceAddress, 20m, 2m);
+            TransactionService.SignTransaction(tx9a, myWallet.PrivateKey);
+            blockChainService.AddTransactionToMempool(tx9a);
+
+            var tx9b = TransactionService.CreateTransaction(myWallet.PublicKey, bobAddress, 15m, 2m);
+            TransactionService.SignTransaction(tx9b, myWallet.PrivateKey);
+            blockChainService.AddTransactionToMempool(tx9b);
+
+            Console.WriteLine($"  tx1 → Alice: 20 coins  (id: {tx9a.Id})");
+            Console.WriteLine($"  tx2 → Bob:   15 coins  (id: {tx9b.Id})");
+
+            // Mine a block that includes both transactions
+            blockChainService.MineBlock(myWallet.PublicKey);
+            Console.WriteLine($"Block mined. Alice balance: {blockChainService.GetBalance(aliceAddress)}, " +
+                              $"Bob balance: {blockChainService.GetBalance(bobAddress)}");
+
+            // Mine one more user block for a deeper reorg
+            blockChainService.MineBlock(myWallet.PublicKey);
+            Console.WriteLine($"User chain length: {blockChainService.Chain.Count}");
+
+            // ── Phase 4: Hacker side — mine more blocks, ignore our txs ──────
+            // fakeNode has NO knowledge of tx9a or tx9b — they live only in our fork.
+            Console.WriteLine("\n[Phase 4] Hacker side: mining competing chain without our transactions...");
+            var hackerAddr = "HackerWallet";
+
+            // Beat user chain in BOTH length and cumulative difficulty
+            while (fakeNode9.Chain.Count <= blockChainService.Chain.Count ||
+                   fakeNode9.Chain.Sum(b => b.DifficultyAtMining)
+                       <= blockChainService.Chain.Sum(b => b.DifficultyAtMining))
+            {
+                fakeNode9.MineBlock(hackerAddr);
+            }
+            fakeNode9.MineBlock(hackerAddr); // one extra for good measure
+
+            Console.WriteLine($"Hacker chain length:      {fakeNode9.Chain.Count}  " +
+                              $"(diff: {fakeNode9.Chain.Sum(b => b.DifficultyAtMining):F2})");
+            Console.WriteLine($"Our chain length:         {blockChainService.Chain.Count}  " +
+                              $"(diff: {blockChainService.Chain.Sum(b => b.DifficultyAtMining):F2})");
+
+            // ── Snapshot balances for our own comparison printout ────────────
+            decimal snap_user = blockChainService.GetBalance(myWallet.PublicKey);
+            decimal snap_alice = blockChainService.GetBalance(aliceAddress);
+            decimal snap_bob = blockChainService.GetBalance(bobAddress);
+
+            // ── Display chains before the swap ───────────────────────────────
+            Console.WriteLine("\n=================================================");
+            Console.WriteLine("  YOUR CHAIN — before ReplaceChain");
+            Console.WriteLine("=================================================");
+            displayService.DisplayChain(blockChainService);
+
+            Console.WriteLine("\n=================================================");
+            Console.WriteLine("  HACKER CHAIN — incoming from network");
+            Console.WriteLine("=================================================");
+            displayService.DisplayChain(fakeNode9);
+
+            // ── Phase 5: Trigger consensus — watch the auditor messages fire ─
+            Console.WriteLine("\n=================================================");
+            Console.WriteLine("  >>> CALLING ReplaceChain — auditor output below <<<");
+            Console.WriteLine("=================================================\n");
+
+            blockChainService.ReplaceChain(fakeNode9.Chain);
+
+            // ── Display chain after the swap ─────────────────────────────────
+            Console.WriteLine("\n=================================================");
+            Console.WriteLine("  YOUR CHAIN — after ReplaceChain");
+            Console.WriteLine("=================================================");
+            displayService.DisplayChain(blockChainService);
+
+            // ── Summary ───────────────────────────────────────────────────────
+            bool swapped9 = blockChainService.Chain.Last().Author == hackerAddr;
+            if (swapped9)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("\n✓ Reorg completed. Summary of damage:");
+                Console.ResetColor();
+
+                Console.WriteLine($"  Your wallet:  {snap_user}  → {blockChainService.GetBalance(myWallet.PublicKey)}");
+                Console.WriteLine($"  Alice:        {snap_alice} → {blockChainService.GetBalance(aliceAddress)}  (payment erased)");
+                Console.WriteLine($"  Bob:          {snap_bob}   → {blockChainService.GetBalance(bobAddress)}  (payment erased)");
+                Console.WriteLine($"  HackerWallet: {blockChainService.GetBalance(hackerAddr)} (rewarded for longer chain)");
+
+                Console.WriteLine("\n  Verify with UnoptimisedGetBalance (must match cached):");
+                Console.WriteLine($"  Your wallet (recomputed): {blockChainService.UnoptimisedGetBalance(myWallet.PublicKey)}");
+            }
+            else
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("\n✗ Chain was NOT replaced — hacker chain didn't beat ours.");
+                Console.ResetColor();
+            }
+            break;
+
+        default:
+            Console.WriteLine("Invalid choice. Please try again.");
+            break;
+    }
 }
-
-// ── Fund miner ────────────────────────────────────────────────────────────
-for (int i = 0; i < 8; i++)
-    blockChainService.MineBlock(miner1.PublicKey); // 8 × 50 = 400
-
-blockChainService.AddTransactionToMempool(Signed(miner1, alice.PublicKey, 150m, fee: 1m));
-blockChainService.AddTransactionToMempool(Signed(miner1, charlie.PublicKey, 150m, fee: 1m));
-blockChainService.MineBlock(miner1.PublicKey);
-
-Console.WriteLine($"\nAfter funding:");
-Console.WriteLine($"  Alice:   {blockChainService.GetBalance(alice.PublicKey)}");
-Console.WriteLine($"  Charlie: {blockChainService.GetBalance(charlie.PublicKey)}");
-Console.WriteLine($"  Miner1:  {blockChainService.GetBalance(miner1.PublicKey)}");
-
-// ── Demo 1: Fee below NetworkBaseFee rejected ─────────────────────────────
-Console.WriteLine("\n=== DEMO 1: Fee below NetworkBaseFee is rejected ===");
-var lowFeeTx = new Transaction(alice.PublicKey, bob.PublicKey, 10m, fee: 0.5m);
-TransactionService.SignTransaction(lowFeeTx, alice.PrivateKey);
-blockChainService.AddTransactionToMempool(lowFeeTx);
-Console.WriteLine($"Pending after low-fee attempt: {blockChainService.PendingTransactions.Count} (expected 0)");
-
-// ── Demo 2: Tip priority ordering ────────────────────────────────────────
-Console.WriteLine("\n=== DEMO 2: Tip priority ordering ===");
-blockChainService.AddTransactionToMempool(Signed(alice, bob.PublicKey, 10m, fee: 1m)); // tip = 0
-blockChainService.AddTransactionToMempool(Signed(alice, bob.PublicKey, 10m, fee: 5m)); // tip = 4
-blockChainService.AddTransactionToMempool(Signed(charlie, bob.PublicKey, 10m, fee: 3m)); // tip = 2
-
-Console.WriteLine("Queued: alice fee=1 (tip=0), alice fee=5 (tip=4), charlie fee=3 (tip=2)");
-Console.WriteLine($"Pending: {blockChainService.PendingTransactions.Count} (expected 3)");
-
-decimal minerBefore = blockChainService.GetBalance(miner1.PublicKey);
-blockChainService.MineBlock(miner1.PublicKey);
-decimal minerAfter = blockChainService.GetBalance(miner1.PublicKey);
-
-var tipBlock = blockChainService.Chain.Last();
-var coinbase = tipBlock.Transactions.First(t => t.From == "COINBASE");
-Console.WriteLine($"\nCoinbase reward: {coinbase.Amount} (expected 56 = 50 base + tips 4+2+0)");
-Console.WriteLine($"Miner earned:    {minerAfter - minerBefore} (expected 56)");
-
-Console.WriteLine("\nBlock transactions ordered by tip desc:");
-foreach (var tx in tipBlock.Transactions.Where(t => t.From != "COINBASE"))
-{
-    decimal tip = tx.Fee - blockChainService.NetworkBaseFee;
-    Console.WriteLine($"  Amount: {tx.Amount}, Fee: {tx.Fee}, Tip: {tip}, Burned: {blockChainService.NetworkBaseFee}");
-}
-
-// ── Demo 3: Burn audit ────────────────────────────────────────────────────
-Console.WriteLine("\n=== DEMO 3: Burned fees audit ===");
-var explorer = new BlockChainExplorer(blockChainService);
-
-decimal burned = explorer.GetTotalBurnedFees();
-decimal emitted = blockChainService.GetTotalSupply();
-decimal actualSupply = explorer.GetActualTotalSupply();
-
-int nonCoinbaseTxCount = blockChainService.Chain
-    .Skip(1)
-    .SelectMany(b => b.Transactions)
-    .Count(t => t.From != "COINBASE");
-
-Console.WriteLine($"Non-coinbase tx count:           {nonCoinbaseTxCount}");
-Console.WriteLine($"Total emitted (COINBASE sum):    {emitted}");
-Console.WriteLine($"Total burned (BaseFee × txs):   {burned} (expected {nonCoinbaseTxCount} × {blockChainService.NetworkBaseFee} = {nonCoinbaseTxCount * blockChainService.NetworkBaseFee})");
-Console.WriteLine($"Actual supply in circulation:   {actualSupply} (emitted - burned)");
-
-decimal walletSum = blockChainService.GetBalance(alice.PublicKey)
-                  + blockChainService.GetBalance(bob.PublicKey)
-                  + blockChainService.GetBalance(charlie.PublicKey)
-                  + blockChainService.GetBalance(miner1.PublicKey);
-
-Console.WriteLine($"\nWallet balances:");
-Console.WriteLine($"  Alice:   {blockChainService.GetBalance(alice.PublicKey)}");
-Console.WriteLine($"  Bob:     {blockChainService.GetBalance(bob.PublicKey)}");
-Console.WriteLine($"  Charlie: {blockChainService.GetBalance(charlie.PublicKey)}");
-Console.WriteLine($"  Miner1:  {blockChainService.GetBalance(miner1.PublicKey)}");
-Console.WriteLine($"  Sum:     {walletSum}");
-
-// Burned fees left wallets but exist in no wallet — correct invariant is:
-// walletSum + burned == actualSupply  (i.e. all coins are either held or burned)
-Console.WriteLine($"\nAccounting invariant (walletSum + burned == actualSupply):");
-Console.WriteLine($"  {walletSum} + {burned} = {walletSum + burned} == {actualSupply} → {walletSum + burned == actualSupply}");
-
-// ── Demo 4: Per-block breakdown ───────────────────────────────────────────
-Console.WriteLine("\n=== DEMO 4: Per-block fee breakdown ===");
-foreach (var block in blockChainService.Chain.Skip(1))
-{
-    var nonCoinbaseTxs = block.Transactions.Where(t => t.From != "COINBASE").ToList();
-    var cb = block.Transactions.FirstOrDefault(t => t.From == "COINBASE");
-    decimal totalFeePaid = nonCoinbaseTxs.Sum(t => t.Fee);
-    decimal blockBurned = nonCoinbaseTxs.Count * blockChainService.NetworkBaseFee;
-    decimal blockTips = nonCoinbaseTxs.Sum(t => t.Fee - blockChainService.NetworkBaseFee);
-    decimal cbAmount = cb?.Amount ?? 0;
-    decimal baseMiningReward = cbAmount - blockTips;
-    Console.WriteLine($"  Block {block.Index,2}: txs={nonCoinbaseTxs.Count}, " +
-                      $"feePaid={totalFeePaid}, burned={blockBurned}, " +
-                      $"tips={blockTips}, coinbase={cbAmount} " +
-                      $"(base {baseMiningReward} + tips {blockTips})");
-}
-
-// ── Demo 5: Find transaction by ID ───────────────────────────────────────
-Console.WriteLine("\n=== DEMO 5: Find transaction by ID ===");
-var targetTx = tipBlock.Transactions.First(t => t.From != "COINBASE");
-var (foundBlock, foundTx) = explorer.FindTransactionLocation(targetTx.Id);
-Console.WriteLine($"Searched for tx ID: {targetTx.Id}");
-Console.WriteLine($"Found in block:     {foundBlock?.Index} (expected {tipBlock.Index})");
-Console.WriteLine($"Amount: {foundTx?.Amount}, Fee: {foundTx?.Fee}, Tip: {foundTx?.Fee - blockChainService.NetworkBaseFee}");
-
-// ── Demo 6: Address history ───────────────────────────────────────────────
-Console.WriteLine("\n=== DEMO 6: Alice's transaction history ===");
-var aliceHistory = explorer.GetAddressHistory(alice.PublicKey);
-foreach (var tx in aliceHistory)
-{
-    string direction = tx.From == alice.PublicKey ? "SENT" : "RECV";
-    Console.WriteLine($"  [{direction}] Amount: {tx.Amount}, Fee: {tx.Fee}, Tip: {tx.Fee - blockChainService.NetworkBaseFee}");
-}
-Console.WriteLine($"Total txs involving Alice: {aliceHistory.Count}");
-
-// ── Demo 7: Largest transaction ───────────────────────────────────────────
-Console.WriteLine("\n=== DEMO 7: Largest transaction ===");
-var largest = explorer.GetLargestTransaction();
-Console.WriteLine($"Largest tx: Amount={largest?.Amount}, Fee={largest?.Fee}");
-Console.WriteLine($"  From: {(largest?.From == "COINBASE" ? "COINBASE" : largest?.From[..20] + "...")}");
-Console.WriteLine($"  To:   {largest?.To[..20]}...");
-
-Console.WriteLine("\n=== GAP DIAGNOSTIC ===");
-decimal totalSentByUsers = blockChainService.Chain.Skip(1)
-    .SelectMany(b => b.Transactions)
-    .Where(t => t.From != "COINBASE")
-    .Sum(t => t.Amount + t.Fee);
-
-decimal totalReceivedByUsers = blockChainService.Chain.Skip(1)
-    .SelectMany(b => b.Transactions)
-    .Where(t => t.From != "COINBASE")
-    .Sum(t => t.Amount);
-
-decimal totalCoinbase = blockChainService.GetTotalSupply();
-
-Console.WriteLine($"Total sent by users (amount+fee): {totalSentByUsers}");
-Console.WriteLine($"Total received by users (amount): {totalReceivedByUsers}");
-Console.WriteLine($"Total coinbase emitted:           {totalCoinbase}");
-Console.WriteLine($"Fee paid total:                   {totalSentByUsers - totalReceivedByUsers}");
-Console.WriteLine($"Tips to miners:                   {totalSentByUsers - totalReceivedByUsers - burned}");
-Console.WriteLine($"Expected wallet sum:              {totalCoinbase - burned}");
-Console.WriteLine($"Actual wallet sum:                {walletSum}");
-Console.WriteLine($"Difference:                       {totalCoinbase - burned - walletSum}");
