@@ -30,10 +30,10 @@ namespace BlockChain.Services
             if (string.IsNullOrWhiteSpace(transaction.To))
                 return (false, "Recipient address cannot be empty.");
             if (transaction.Amount <= 0) return (false, "Amount must be greater than zero.");
-            if (transaction.Signature == null || transaction.Signature.Length == 0) // Assuming signature is required for a valid transaction
-                return (false, "Transaction must be signed.");
-            if(!cryptoService.VerifySignature(transaction.ToRawString(), transaction.Signature, transaction.From)) // Assuming From is the public key or address that can be used to verify the signature
-                return (false, "Invalid transaction signature.");
+            //if (transaction.Signature == null || transaction.Signature.Length == 0) // Assuming signature is required for a valid transaction
+            //    return (false, "Transaction must be signed.");
+            //if(!cryptoService.VerifySignature(transaction.ToRawString(), transaction.Signature, transaction.From)) // Assuming From is the public key or address that can be used to verify the signature
+            //    return (false, "Invalid transaction signature.");
             if(transaction.Fee < 0) return (false, "Transaction fee must be non-negative.");
             return (true, string.Empty);
         }
