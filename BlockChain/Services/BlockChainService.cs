@@ -195,7 +195,12 @@ namespace BlockChain.HashingService
                     }
 
                     var (isValid, _) = TransactionService.ValidateTransaction(tx);
-                    if (!isValid) return false;
+                    if (!isValid)
+                    {
+                        // Log security alert to file
+                        LogSecurityAlert(tx);
+                        return false;
+                    }
                 }
 
                 // f. Exactly one coinbase per block (no double-rewarding)
@@ -541,6 +546,20 @@ namespace BlockChain.HashingService
             clone.RebuildState(); // rebuild Balances from the copied chain
 
             return clone;
+        }
+
+        private static void LogSecurityAlert(Transaction transaction)
+        {
+            var alertMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}] SECURITY ALERT: Invalid transaction detected!\n" +
+                              $"  From: {transaction.From}\n" +
+                              $"  To: {transaction.To}\n" +
+                              $"  Amount: {transaction.Amount}\n" +
+                              $"  Fee: {transaction.Fee}\n" +
+                              $"  Timestamp: {transaction.Timestamp:yyyy-MM-dd HH:mm:ss}\n" +
+                              new string('-', 50) + "\n";
+
+            File.AppendAllText("security_alerts.txt", alertMessage);
+            Console.WriteLine("Security alert logged to security_alerts.txt");
         }
     }
 }

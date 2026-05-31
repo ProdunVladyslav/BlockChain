@@ -10,6 +10,8 @@ service.AddSingleton<CryptoService>();
 service.AddSingleton<P2PClient>();
 service.AddSingleton<DisplayService>();
 service.AddSingleton<P2PServer>();
+service.AddSingleton<HashingService>();
+service.AddSingleton<MiningService>();
 
 var provider = service.BuildServiceProvider();
 
@@ -76,7 +78,12 @@ while (flag)
     Console.WriteLine("4 - Mine block");
     Console.WriteLine("5 - See block chain");
     Console.WriteLine("6 - Balance");
-    Console.WriteLine("7 - Exit");
+    Console.WriteLine("7 - Save chain to file");
+    Console.WriteLine("8 - Load chain from file");
+    Console.WriteLine("9 - Exit");
+    Console.WriteLine("0 - Run Fork Auditor simulation");
+    Console.WriteLine("a - Simulate Hacker Attack");
+
     Console.Write("Enter your choice: ");
 
     switch (Console.ReadLine())
@@ -149,12 +156,48 @@ while (flag)
             Console.WriteLine($"Your balance: {balance}");
             break;
 
-        case "7":
+        case "9":
             Console.WriteLine("Exiting...");
             flag = false;
             break;
 
-        case "9":
+        case "7":
+            Console.Write("Enter file path to save (e.g. chain.json): ");
+            var savePath = Console.ReadLine();
+            if (string.IsNullOrWhiteSpace(savePath))
+            {
+                Console.WriteLine("Invalid path.");
+                break;
+            }
+            try
+            {
+                blockChainService.SaveToFile(savePath);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error saving chain: {ex.Message}");
+            }
+            break;
+
+        case "8":
+            Console.Write("Enter file path to load (e.g. chain.json): ");
+            var loadPath = Console.ReadLine();
+            if (string.IsNullOrWhiteSpace(loadPath))
+            {
+                Console.WriteLine("Invalid path.");
+                break;
+            }
+            try
+            {
+                blockChainService.LoadFromFile(loadPath);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error loading chain: {ex.Message}");
+            }
+            break;
+
+        case "0":
             Console.WriteLine("\n=================================================");
             Console.WriteLine("  FORK AUDITOR — Симуляція мережевого розколу");
             Console.WriteLine("=================================================");
@@ -271,6 +314,22 @@ while (flag)
                 Console.WriteLine("\n✗ Chain was NOT replaced — hacker chain didn't beat ours.");
                 Console.ResetColor();
             }
+            break;
+
+        case "a":
+            Console.WriteLine("HACKER ATTACK SIMULATION");
+            var lastBlock = blockChainService.Chain.Last();
+            var firstTx = lastBlock.Transactions.FirstOrDefault(t => t.From != "COINBASE");
+            firstTx.Amount = 1_000_000m; // inflate the amount to a huge value
+            lastBlock.Nonce = 0; // reset nonce to force re-mining
+
+            var miningService = provider.GetRequiredService<MiningService>();
+            var hashingService = provider.GetRequiredService<HashingService>();
+
+            // Re-mine the block with the modified transaction
+            MiningService.MineBlockMultiThreaded(lastBlock, blockChainService.Difficulty);
+
+            blockChainService.SaveToFile("chain.json");
             break;
 
         default:
