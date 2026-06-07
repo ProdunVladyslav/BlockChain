@@ -19,6 +19,9 @@ namespace BlockChain.Model
         [JsonPropertyName("difficultyAtMining")]
         public double DifficultyAtMining { get; set; }
 
+        [JsonPropertyName("merkle_root")]
+        public string MerkleRoot { get; set; }
+
         [JsonPropertyName("nonce")]
         public long Nonce { get; set; } // Added Nonce property for proof-of-work
 

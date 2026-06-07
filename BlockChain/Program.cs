@@ -12,6 +12,7 @@ service.AddSingleton<DisplayService>();
 service.AddSingleton<P2PServer>();
 service.AddSingleton<HashingService>();
 service.AddSingleton<MiningService>();
+service.AddSingleton<StorageService>();
 
 var provider = service.BuildServiceProvider();
 
@@ -22,6 +23,13 @@ var cryptoService = provider.GetRequiredService<CryptoService>();
 var displayService = provider.GetRequiredService<DisplayService>();
 
 var myWallet = new Wallet(cryptoService);
+
+// Auto-broadcast chain whenever a block is mined locally
+blockChainService.BlockMined += block =>
+{
+    _ = p2pClient.BroadcastChainAsync(blockChainService.Chain);
+    Console.WriteLine($"[P2P] Auto-broadcast chain after mining block #{block.Index}");
+};
 
 // TASK 1
 
@@ -83,6 +91,8 @@ while (flag)
     Console.WriteLine("9 - Exit");
     Console.WriteLine("0 - Run Fork Auditor simulation");
     Console.WriteLine("a - Simulate Hacker Attack");
+    Console.WriteLine("s - Request chain from peer");
+    Console.WriteLine("t - Run forensic audit test (Task 1 final test)");
 
     Console.Write("Enter your choice: ");
 
@@ -97,7 +107,7 @@ while (flag)
                 Console.WriteLine("Invalid address format. Please use IP:Port format.");
                 break;
             }
-            p2pClient.ConnectAsync(nodeAddress);
+            await p2pClient.ConnectAsync(nodeAddress);
             break;
 
         case "2":
@@ -316,6 +326,19 @@ while (flag)
             }
             break;
 
+        case "s":
+            Console.WriteLine("Enter the address of the peer to request chain from (e.g., 127.0.0.1:5001):");
+            var chainNodeAddress = Console.ReadLine();
+            if (string.IsNullOrWhiteSpace(chainNodeAddress) || !chainNodeAddress.Contains(':'))
+            {
+                Console.WriteLine("Invalid address format. Please use IP:Port format.");
+                break;
+            }
+            var parts = chainNodeAddress.Split(':');
+            await p2pClient.RequestChainAsync(parts[0], int.Parse(parts[1]));
+            Console.WriteLine("Chain request sent.");
+            break;
+
         case "a":
             Console.WriteLine("HACKER ATTACK SIMULATION");
             var lastBlock = blockChainService.Chain.Last();
@@ -330,6 +353,96 @@ while (flag)
             MiningService.MineBlockMultiThreaded(lastBlock, blockChainService.Difficulty);
 
             blockChainService.SaveToFile("chain.json");
+            break;
+
+        case "t":
+            Console.WriteLine("\n=================================================");
+            Console.WriteLine("  TASK 1 FINAL TEST — Forensic Audit Demo");
+            Console.WriteLine("=================================================");
+
+            // ── Phase 1: build a fresh isolated chain with 6 blocks ──────────
+            Console.WriteLine("\n[Phase 1] Mining 6 blocks on a local test chain...");
+            var testService = blockChainService.Clone(); // isolated copy, doesn't touch real chain
+            var testKey = myWallet.PublicKey;
+
+            // give the miner a real COINBASE balance first, then add user txs
+            testService.MineBlock(testKey); // block 1
+            testService.MineBlock(testKey); // block 2
+            testService.MineBlock(testKey); // block 3 ← attack target
+            testService.MineBlock(testKey); // block 4
+            testService.MineBlock(testKey); // block 5
+            testService.MineBlock(testKey); // block 6
+
+            Console.WriteLine($"  Chain length: {testService.Chain.Count} blocks (genesis + 6)");
+            for (int i = 0; i < testService.Chain.Count; i++)
+            {
+                var b = testService.Chain[i];
+                Console.WriteLine($"  Block #{b.Index}  hash={b.Hash[..16]}...  txs={b.Transactions.Count}");
+            }
+
+            // ── Phase 2: tamper block #3 directly (no re-mining) ─────────────
+            Console.WriteLine("\n[Phase 2] Tampering block #3 — inflating a COINBASE reward directly...");
+            var attackBlock = testService.Chain.FirstOrDefault(b => b.Index == 3);
+            if (attackBlock == null)
+            {
+                Console.WriteLine("  ERROR: block #3 not found. Aborting.");
+                break;
+            }
+
+            var victimTx = attackBlock.Transactions.FirstOrDefault(t => t.From == "COINBASE");
+            if (victimTx == null)
+            {
+                Console.WriteLine("  ERROR: no COINBASE transaction in block #3. Aborting.");
+                break;
+            }
+
+            decimal originalAmount = victimTx.Amount;
+            victimTx.Amount = 999_999m; // inflate without re-mining — MerkleRoot will mismatch
+            Console.WriteLine($"  Block #3 COINBASE tx: {originalAmount} → {victimTx.Amount}");
+            Console.WriteLine($"  Hash unchanged (attacker forgot to re-mine): {attackBlock.Hash[..16]}...");
+
+            // ── Phase 3: RunFullAudit ─────────────────────────────────────────
+            Console.WriteLine("\n[Phase 3] Running RunFullAudit...");
+            var auditReport = blockChainService.RunFullAudit(testService.Chain);
+
+            Console.WriteLine($"  IsChainValid        : {auditReport.IsChainValid}");
+            Console.WriteLine($"  Compromised blocks  : [{string.Join(", ", auditReport.CompromisedBlockIndexes.Select(i => $"#{i}"))}]");
+            foreach (var kv in auditReport.ViolationDetails.OrderBy(x => x.Key))
+                foreach (var v in kv.Value)
+                    Console.WriteLine($"    [Block #{kv.Key}] {v}");
+
+            // ── Phase 4: FindAttackOrigin ─────────────────────────────────────
+            Console.WriteLine("\n[Phase 4] Running FindAttackOrigin...");
+            var origin = blockChainService.FindAttackOrigin(auditReport, testService.Chain);
+            if (origin != null)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"  >>> Attack origin identified: Block #{origin.Index} <<<");
+                Console.ResetColor();
+                Console.WriteLine($"  Timestamp : {origin.Timestamp:yyyy-MM-dd HH:mm:ss}");
+                Console.WriteLine($"  Hash      : {origin.Hash[..16]}...");
+                Console.WriteLine($"  Txs       : {origin.Transactions.Count}");
+                Console.WriteLine($"  Correct?  : {(origin.Index == 3 ? "✅ YES — block #3 correctly identified!" : "❌ NO — wrong block identified!")}");
+            }
+            else
+            {
+                Console.WriteLine("  FindAttackOrigin returned null — no non-PrevHash violation found.");
+            }
+
+            // ── Phase 5: GenerateForensicReport ──────────────────────────────
+            Console.WriteLine("\n[Phase 5] Running GenerateForensicReport...");
+            var forensicText = blockChainService.GenerateForensicReport(auditReport, origin);
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine(forensicText);
+            Console.ResetColor();
+
+            // ── Summary ───────────────────────────────────────────────────────
+            bool testPassed = origin?.Index == 3 && !auditReport.IsChainValid;
+            Console.ForegroundColor = testPassed ? ConsoleColor.Green : ConsoleColor.Yellow;
+            Console.WriteLine(testPassed
+                ? "=== TEST PASSED: system correctly detected and located the 51% attack ==="
+                : "=== TEST FAILED: check the audit logic above ===");
+            Console.ResetColor();
             break;
 
         default:
