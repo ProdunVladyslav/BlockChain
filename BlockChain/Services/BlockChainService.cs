@@ -1,5 +1,6 @@
 ﻿using BlockChain.Model;
 using BlockChain.Services;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -25,8 +26,14 @@ namespace BlockChain.HashingService
 
         private readonly Dictionary<string, decimal> Balances = new Dictionary<string, decimal>(); // Dictionary to track balances of public keys (not currently used in this implementation)
 
+        // Identity baked into the genesis block. All nodes run by the same student must share it
+        // (set the STUDENT_ID env var identically on all 3 terminals) so their genesis — and thus
+        // their whole chain — matches and can be shared. Different students get a different genesis.
+        public string StudentId { get; }
+
         public BlockChainService()
         {
+            StudentId = Environment.GetEnvironmentVariable("STUDENT_ID") ?? "STUDENT_DEFAULT";
             Chain = new List<Block>(); // Initialize the blockchain as an empty list
             _miningService = new MiningService();
             AddGenesisBlock();
@@ -34,8 +41,12 @@ namespace BlockChain.HashingService
 
         private void AddGenesisBlock()
         {
-            Block genesisBlock = new Block(0, DateTime.Parse("2024-06-01T00:00:00Z"), new List<Transaction>(), "0", "Name", Difficulty);
-            genesisBlock.Hash = HashingService.ComputeHash(genesisBlock); // Compute the hash for the genesis block
+            var genesisTransactions = new List<Transaction>();
+            // Author = StudentId so the genesis hash is unique per student but identical across
+            // that student's own nodes. Mined deterministically so the hash is reproducible.
+            Block genesisBlock = new Block(0, DateTime.Parse("2024-06-01T00:00:00Z"), genesisTransactions, "0", StudentId, Difficulty);
+            genesisBlock.MerkleRoot = HashingService.BuildMerkleRoot(genesisTransactions);
+            MiningService.MineBlockDeterministic(genesisBlock, Difficulty);
             Chain.Add(genesisBlock);
         }
 
@@ -75,6 +86,8 @@ namespace BlockChain.HashingService
             }
         }
 
+        public event Action<Block>? BlockMined;
+
         public void MineBlock(string minerPublicKey)
         {
             PendingTransactions.RemoveAll(t => t.Timestamp < DateTime.UtcNow.AddSeconds(-_ttlTransactionsSeconds)); // Remove transactions that have exceeded their time-to-live from the mempool
@@ -95,11 +108,14 @@ namespace BlockChain.HashingService
 
             var lastBlock = Chain.Last();
             Block newBlock = new Block(lastBlock.Index + 1, DateTime.UtcNow, transactionsToInclude, lastBlock.Hash, minerPublicKey, Difficulty);
+            newBlock.MerkleRoot = HashingService.BuildMerkleRoot(transactionsToInclude); // Compute the Merkle root for the transactions in the new block
 
             MiningService.MineBlockMultiThreaded(newBlock, Difficulty); // Mine the new block using the MiningService
             Chain.Add(newBlock); // Add the new block to the blockchain
             PendingTransactions.RemoveAll(t => transactionsToInclude.Contains(t)); // Remove the included transactions from the mempool
             UpdateBalances(newBlock); // Update the balances based on the transactions in the new block
+
+            BlockMined?.Invoke(newBlock);
 
             if (newBlock.Index % difficultyAdjustmentInterval == 0)
             {
@@ -175,14 +191,7 @@ namespace BlockChain.HashingService
                 if (currentBlock.PreviousHash != previousBlock.Hash) return false;
 
                 // d. Hash must meet the difficulty target that was declared at mining
-                int wholePart = (int)currentBlock.DifficultyAtMining;
-                double fraction = currentBlock.DifficultyAtMining - wholePart;
-                string hexChars = "0123456789abcdef";
-                char fractionalChar = hexChars[15 - Math.Min(15, (int)(fraction * 16))];
-
-                if (currentBlock.Hash.Length <= wholePart) return false;
-                if (!currentBlock.Hash.StartsWith(new string('0', wholePart))) return false;
-                if (currentBlock.Hash[wholePart] > fractionalChar) return false;
+                if (!MeetsDifficulty(currentBlock)) return false;
 
                 // e. Every non-coinbase transaction must have a valid signature
                 int coinbaseCount = 0;
@@ -195,7 +204,12 @@ namespace BlockChain.HashingService
                     }
 
                     var (isValid, _) = TransactionService.ValidateTransaction(tx);
-                    if (!isValid) return false;
+                    if (!isValid)
+                    {
+                        // Log security alert to file
+                        LogSecurityAlert(tx);
+                        return false;
+                    }
                 }
 
                 // f. Exactly one coinbase per block (no double-rewarding)
@@ -430,78 +444,14 @@ namespace BlockChain.HashingService
             if (!IsChainValid(newChain)) return;
             if (newChain.Sum(x => x.DifficultyAtMining) <= Chain.Sum(x => x.DifficultyAtMining)) return;
 
-            int forkIndex = FindForkIndex(Chain, newChain);
-
-            var revertedBlocks = Chain.Skip(forkIndex).ToList(); // leaving the chain
-            var addedBlocks = newChain.Skip(forkIndex).ToList(); // joining the chain
-
-            var transactionsWereAboutToHappen = revertedBlocks.SelectMany(b => b.Transactions).Where(t => t.From != "COINBASE").ToList();
-            var tranactionsHappenedInNewChain = addedBlocks.SelectMany(b => b.Transactions).Where(t => t.From != "COINBASE").ToList();
-
-            var transactionsLost = transactionsWereAboutToHappen.Where(t => !tranactionsHappenedInNewChain.Any(nt => nt.Id == t.Id)).ToList();
-
-            var prev = Console.ForegroundColor;
-            Console.ForegroundColor = ConsoleColor.Red;
-            foreach (var tx in transactionsLost)
+            Balances.Clear();
+            foreach (var block in newChain)
             {
-                Console.WriteLine($"[ALARM] Transaction {tx.Id} was lost due to reorg!");
-            }
-            Console.ForegroundColor = prev;
-
-            prev = Console.ForegroundColor;
-            Console.ForegroundColor = ConsoleColor.Blue;
-            Console.WriteLine($"[AUDIT] Our chain has been leaving for {revertedBlocks.Count} in past!");
-            Console.ForegroundColor = prev;
-
-            Console.WriteLine($"Reorg: reverting {revertedBlocks.Count} block(s), applying {addedBlocks.Count} block(s).");
-
-            var userBalancesSnapshot = new Dictionary<string, decimal>(Balances); // snapshot before reorg for auditing
-
-            // 1. Revert old blocks in REVERSE order (tip → fork)
-            for (int i = revertedBlocks.Count - 1; i >= 0; i--)
-            {
-                RevertBalances(revertedBlocks[i]);
+                UpdateBalances(block);  
             }
 
-            // 2. Apply new blocks in FORWARD order (fork → tip)
-            foreach (var block in addedBlocks)
-            {
-                UpdateBalances(block);
-            }
-
-            prev = Console.ForegroundColor;
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            foreach (var balance in Balances)
-            {
-                decimal oldBalance = userBalancesSnapshot.ContainsKey(balance.Key) ? userBalancesSnapshot[balance.Key] : 0;
-                if (balance.Value < oldBalance)
-                {
-                    Console.WriteLine($"[BALANCE AUDIT] Attention! User {balance.Key} has lost {oldBalance - balance.Value} coins afetr network backup!");
-                    
-                }
-            }
-            Console.ForegroundColor = prev;
-
-            // 3. Put unconfirmed txs from reverted blocks back into the mempool
-            //    (skip COINBASE rewards and txs already included in the new chain)
-            var addedTxIds = addedBlocks
-                .SelectMany(b => b.Transactions)
-                .Select(t => t.Id)
-                .ToHashSet();
-
-            foreach (var block in revertedBlocks)
-            {
-                foreach (var tx in block.Transactions)
-                {
-                    if (tx.From == "COINBASE") continue;
-                    if (addedTxIds.Contains(tx.Id)) continue;
-                    PendingTransactions.Add(tx);
-                }
-            }
-
-            // 4. Remove from the mempool any txs that are now confirmed in the new chain
-            PendingTransactions.RemoveAll(tx => addedTxIds.Contains(tx.Id));
-
+            var minedTxIds = new HashSet<Guid>(Chain.SelectMany(b => b.Transactions).Select(t => t.Id));
+            PendingTransactions.RemoveAll(t => minedTxIds.Contains(t.Id));
             Chain = newChain;
         }
         
@@ -542,5 +492,120 @@ namespace BlockChain.HashingService
 
             return clone;
         }
+
+        private static void LogSecurityAlert(Transaction transaction)
+        {
+            var alertMessage = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}] SECURITY ALERT: Invalid transaction detected!\n" +
+                              $"  From: {transaction.From}\n" +
+                              $"  To: {transaction.To}\n" +
+                              $"  Amount: {transaction.Amount}\n" +
+                              $"  Fee: {transaction.Fee}\n" +
+                              $"  Timestamp: {transaction.Timestamp:yyyy-MM-dd HH:mm:ss}\n" +
+                              new string('-', 50) + "\n";
+
+            File.AppendAllText("security_alerts.txt", alertMessage);
+            Console.WriteLine("Security alert logged to security_alerts.txt");
+        }
+
+        private static void AddViolation(AuditReport report, int index, string detail)
+        {
+            if (!report.CompromisedBlockIndexes.Contains(index))
+                report.CompromisedBlockIndexes.Add(index);
+
+            if (!report.ViolationDetails.TryGetValue(index, out var details))
+            {
+                details = new List<string>();
+                report.ViolationDetails[index] = details;
+            }
+            details.Add(detail);
+
+            report.IsChainValid = false;
+        }
+
+        private static bool MeetsDifficulty(Block block)
+        {
+            int wholePart = (int)block.DifficultyAtMining;
+            double fraction = block.DifficultyAtMining - wholePart;
+            string hexChars = "0123456789abcdef";
+            char fractionalChar = hexChars[15 - Math.Min(15, (int)(fraction * 16))];
+
+            if (block.Hash.Length <= wholePart) return false;
+            if (!block.Hash.StartsWith(new string('0', wholePart))) return false;
+            if (block.Hash[wholePart] > fractionalChar) return false;
+
+            return true;
+        }
+
+        public AuditReport RunFullAudit(List<Block> chain)
+        {
+            var report = new AuditReport
+            {
+                CompromisedBlockIndexes = new List<int>(),
+                IsChainValid = true,
+                ViolationDetails = new Dictionary<int, List<string>>()
+            };
+            for (int i = 0; i < chain.Count; i++)
+            {
+                // 1
+                if (i > 0 && chain[i].PreviousHash != chain[i - 1].Hash)
+                    AddViolation(report, i, "Invalid PrevHash");
+
+                // 2
+                if (chain[i].MerkleRoot != HashingService.BuildMerkleRoot(chain[i].Transactions))
+                    AddViolation(report, i, "Invalid MerkleRoot");
+
+                // 3
+                if (!MeetsDifficulty(chain[i]))
+                    AddViolation(report, i, "Invalid Difficulty");
+            }
+
+            return report;
+        }
+
+        public Block FindAttackOrigin(AuditReport report, List<Block> chain)
+        {
+            foreach (var entry in report.ViolationDetails.OrderBy(x => x.Key))
+            {
+                if (entry.Value.Any(v => v != "Invalid PrevHash"))
+                    return chain[entry.Key];
+            }
+            return null;
+        }
+
+        public string GenerateForensicReport(AuditReport report, Block attackOrigin)
+        {
+            var sb = new StringBuilder();
+
+            sb.AppendLine("=== FORENSIC AUDIT REPORT ===");
+            sb.AppendLine($"Chain status: {(report.IsChainValid ? "VALID" : "COMPROMISED")}");
+
+            if (attackOrigin != null)
+                sb.AppendLine($"Attack origin: Block #{attackOrigin.Index} (timestamp: {attackOrigin.Timestamp:yyyy-MM-dd HH:mm:ss})");
+            else
+                sb.AppendLine("Attack origin: none identified");
+
+            sb.AppendLine($"Total affected blocks: {report.CompromisedBlockIndexes.Count}");
+            sb.AppendLine();
+
+            sb.AppendLine("VIOLATION LOG:");
+            foreach (var entry in report.ViolationDetails.OrderBy(x => x.Key))
+            {
+                foreach (var violation in entry.Value)
+                    sb.AppendLine($"[Block #{entry.Key}] {Explain(violation)}");
+            }
+
+            return sb.ToString();
+        }
+
+        private static string Explain(string violation) => violation switch
+        {
+            "Invalid MerkleRoot" => "MerkleRoot mismatch — transactions were tampered",
+            "Invalid Hash" => "Hash does not match block contents — data was altered",
+            "Invalid Difficulty" => "Hash does not meet difficulty — block was not re-mined",
+            "Invalid PrevHash" => "PrevHash mismatch — inherited from the attacked block",
+            _ => violation
+        };
+
+
     }
 }
