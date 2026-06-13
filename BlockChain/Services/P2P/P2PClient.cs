@@ -10,10 +10,10 @@ namespace BlockChain.Services.P2P
 {
     public class P2PClient
     {
-        public readonly List<string> _peers = new List<string>(); // This will hold the connected peers, using their address as the key
+        public readonly List<string> _peers = new List<string>();
+        public readonly List<string> _peersToRemove = new List<string>();
 
-        // The port OUR server listens on. Advertised to peers during the handshake
-        // so they can open connections back to us (bidirectional gossip).
+
         public int ListeningPort { get; set; }
 
         public async Task ConnectAsync(string peerAddress)
@@ -45,9 +45,6 @@ namespace BlockChain.Services.P2P
                 await testClient.ConnectAsync(parts[0], port);
                 _peers.Add(peerAddress);
 
-                // Handshake: tell the peer the port WE listen on, so it adds us back
-                // and can push freshly-mined blocks to us. Without this the link is
-                // one-directional and only the side that connected ever receives updates.
                 var hello = new NetworkMessage("HELLO", ListeningPort.ToString());
                 var helloJson = System.Text.Json.JsonSerializer.Serialize(hello);
                 await using var stream = testClient.GetStream();
@@ -131,9 +128,9 @@ namespace BlockChain.Services.P2P
         {
             var jsonMessage = System.Text.Json.JsonSerializer.Serialize(message);
 
-            try
+            foreach (var peer in _peers)
             {
-                foreach (var peer in _peers)
+                try
                 {
                     var parts = peer.Split(':');
                     if (parts.Length > 0)
@@ -148,10 +145,16 @@ namespace BlockChain.Services.P2P
                         await writer.WriteLineAsync(jsonMessage);
                     }
                 }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error sending message to {peer}: {ex.Message}");
+                    _peersToRemove.Add(peer);
+                }
             }
-            catch (Exception ex)
+            foreach (var peer in _peersToRemove)
             {
-                Console.WriteLine($"Error broadcasting chain: {ex.Message}");
+                _peers.Remove(peer);
+                Console.WriteLine($"Removed peer {peer} due to connection issues.");
             }
         }
     }

@@ -104,7 +104,8 @@ while (flag)
     Console.WriteLine("6 - Balance");
     Console.WriteLine("7 - Save chain to file");
     Console.WriteLine("8 - Load chain from file");
-    Console.WriteLine("9 - Exit");
+    Console.WriteLine("9 - Знайти транзакцію за ID");
+    Console.WriteLine("e - Exit");
     Console.WriteLine("0 - Run Fork Auditor simulation");
     Console.WriteLine("a - Simulate Hacker Attack");
     Console.WriteLine("s - Request chain from peer");
@@ -150,7 +151,15 @@ while (flag)
                 var transaction = TransactionService.CreateTransaction(myWallet.PublicKey, toAddress, amount, fee);
                 TransactionService.SignTransaction(transaction, myWallet.PrivateKey);
                 blockChainService.AddTransactionToMempool(transaction);
-                await p2pClient.BroadcastTransactionAsync(transaction);
+                if (blockChainService.PendingTransactions.Contains(transaction))
+                {
+                    await p2pClient.BroadcastTransactionAsync(transaction);
+                    Console.WriteLine($"Transaction accepted. ID: {transaction.Id}");
+                }
+                else
+                {
+                    Console.WriteLine("Transaction was rejected and not added to mempool.");
+                }
             }
             catch (Exception ex)
             {
@@ -184,6 +193,49 @@ while (flag)
             break;
 
         case "9":
+            Console.Write("Введіть ID транзакції: ");
+            var txIdInput = Console.ReadLine();
+            if (!Guid.TryParse(txIdInput, out Guid txId))
+            {
+                Console.WriteLine("Невірний формат ID.");
+                break;
+            }
+
+            var foundTx = blockChainService.Chain
+                .SelectMany(b => b.Transactions)
+                .FirstOrDefault(t => t.Id == txId);
+
+            if (foundTx != null)
+            {
+                var blockIndex = blockChainService.Chain
+                    .First(b => b.Transactions.Any(t => t.Id == txId)).Index;
+                Console.WriteLine("Транзакцію знайдено в блоці:");
+                Console.WriteLine($"  Блок: #{blockIndex}");
+                Console.WriteLine($"  Від:  {foundTx.From}");
+                Console.WriteLine($"  До:   {foundTx.To}");
+                Console.WriteLine($"  Сума: {foundTx.Amount}");
+                Console.WriteLine($"  Час:  {foundTx.Timestamp:yyyy-MM-dd HH:mm:ss}");
+            }
+            else
+            {
+                var pendingTx = blockChainService.PendingTransactions
+                    .FirstOrDefault(t => t.Id == txId);
+                if (pendingTx != null)
+                {
+                    Console.WriteLine("Транзакція знаходиться в мемпулі (очікує на майнінг):");
+                    Console.WriteLine($"  Від:  {pendingTx.From}");
+                    Console.WriteLine($"  До:   {pendingTx.To}");
+                    Console.WriteLine($"  Сума: {pendingTx.Amount}");
+                    Console.WriteLine($"  Час:  {pendingTx.Timestamp:yyyy-MM-dd HH:mm:ss}");
+                }
+                else
+                {
+                    Console.WriteLine("Транзакцію не знайдено.");
+                }
+            }
+            break;
+
+        case "e":
             Console.WriteLine("Exiting...");
             flag = false;
             break;
