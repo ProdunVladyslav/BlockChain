@@ -166,7 +166,7 @@ while (flag)
             }
             Console.WriteLine($"Mem-pool ({blockChainService.PendingTransactions.Count} transactions):");
             foreach (var tx in blockChainService.PendingTransactions)
-                Console.WriteLine($"  {tx.From[..16]}... -> {tx.To[..16]}..., amount={tx.Amount}, fee={tx.Fee}");
+                Console.WriteLine($"  {tx.From.Substring(0, Math.Min(16, tx.From.Length))}... -> {tx.To.Substring(0, Math.Min(16, tx.To.Length))}..., amount={tx.Amount}, fee={tx.Fee}");
             break;
 
 
@@ -468,6 +468,7 @@ while (flag)
             {
                 Console.WriteLine("\nHomework menu:");
                 Console.WriteLine("1 - Стейт, TTL та Антиспам");
+                Console.WriteLine("2 - LockTime, Fee Priority & TTL Demo");
                 Console.WriteLine("9 - Back to main menu");
                 Console.Write("Pick HW: ");
                 switch (Console.ReadLine())
@@ -530,6 +531,72 @@ while (flag)
                             }
                         }
                         Console.WriteLine($"Total added: {added}, final pending count: {svc3.PendingTransactions.Count}");
+                        break;
+
+                    case "2":
+                        Console.WriteLine("\nRunning HW: LockTime, Fee Priority & TTL Demo");
+
+                        var svc = blockChainService.Clone();
+                        // svc has 1 block (genesis) after Clone — mine a few blocks to give the wallet balance
+                        svc.MineBlock(myWallet.PublicKey);
+                        svc.MineBlock(myWallet.PublicKey);
+
+                        // --- Demo 1: Fee Priority (VIP Queue) ---
+                        Console.WriteLine("\n--- Demo 1: Fee Priority ---");
+                        var txLowFee = TransactionService.CreateTransaction(myWallet.PublicKey, "LowFeeReceiver", 5m, 1.0m);
+                        var txHighFee = TransactionService.CreateTransaction(myWallet.PublicKey, "HighFeeReceiver", 5m, 5.0m);
+                        TransactionService.SignTransaction(txLowFee, myWallet.PrivateKey);
+                        TransactionService.SignTransaction(txHighFee, myWallet.PrivateKey);
+                        svc.AddTransactionToMempool(txLowFee);
+                        svc.AddTransactionToMempool(txHighFee);
+
+                        Console.WriteLine("Mempool before mining:");
+                        foreach (var tx in svc.PendingTransactions.OrderByDescending(t => t.Fee))
+                            Console.WriteLine($"  {tx.From.Substring(0, Math.Min(16, tx.From.Length))}... -> {tx.To.Substring(0, Math.Min(16, tx.To.Length))}...  Fee={tx.Fee}  Amount={tx.Amount}");
+
+                        svc.MineBlock(myWallet.PublicKey);
+                        var minedBlock = svc.Chain.Last();
+                        Console.WriteLine($"\nMined block #{minedBlock.Index} with {minedBlock.Transactions.Count - 1} user txs.");
+                        Console.WriteLine("Transactions in block (excluding coinbase):");
+                        foreach (var tx in minedBlock.Transactions.Where(t => t.From != "COINBASE"))
+                            Console.WriteLine($"  {tx.From.Substring(0, Math.Min(16, tx.From.Length))}... -> {tx.To.Substring(0, Math.Min(16, tx.To.Length))}...  Fee={tx.Fee}  Amount={tx.Amount}");
+                        Console.WriteLine($"Remaining mempool: {svc.PendingTransactions.Count} txs");
+
+                        // --- Demo 2: TTL Eviction ---
+                        Console.WriteLine("\n--- Demo 2: TTL Eviction ---");
+                        var freshTx = TransactionService.CreateTransaction(myWallet.PublicKey, "FreshReceiver", 2m, 1.0m);
+                        TransactionService.SignTransaction(freshTx, myWallet.PrivateKey);
+                        svc.AddTransactionToMempool(freshTx);
+                        Console.WriteLine($"Added fresh tx. Mempool count: {svc.PendingTransactions.Count}");
+
+                        var staleTx = new Transaction("StaleSender", "StaleReceiver", 3m, 1.0m)
+                        {
+                            Timestamp = DateTime.UtcNow.AddSeconds(-600) // 10 minutes old, exceeds 300s TTL
+                        };
+                        svc.PendingTransactions.Add(staleTx);
+                        Console.WriteLine($"Injected stale tx (10 min old). Mempool count: {svc.PendingTransactions.Count}");
+
+                        var triggerTx = TransactionService.CreateTransaction(myWallet.PublicKey, "Trigger", 1m, 1.0m);
+                        TransactionService.SignTransaction(triggerTx, myWallet.PrivateKey);
+                        svc.AddTransactionToMempool(triggerTx); // triggers eviction
+                        Console.WriteLine($"After TTL eviction on add. Mempool count: {svc.PendingTransactions.Count}");
+                        Console.WriteLine($"Stale tx still in mempool? {svc.PendingTransactions.Any(t => t.From == "StaleSender")}");
+
+                        // --- Demo 3: LockTime (nLockTime) ---
+                        Console.WriteLine("\n--- Demo 3: LockTime (nLockTime) ---");
+                        int lockHeight = svc.Chain.Count + 4; // lock for 4 more blocks
+                        var lockTx = TransactionService.CreateTransaction(myWallet.PublicKey, "LockReceiver", 7m, 1.0m);
+                        lockTx.LockTime = lockHeight;
+                        TransactionService.SignTransaction(lockTx, myWallet.PrivateKey);
+                        svc.AddTransactionToMempool(lockTx);
+                        Console.WriteLine($"Added tx with LockTime={lockTx.LockTime}. Current chain height: {svc.Chain.Count}.");
+
+                        for (int i = 1; i <= 5; i++)
+                        {
+                            svc.MineBlock(myWallet.PublicKey);
+                            Console.WriteLine($"  Mined block #{svc.Chain.Last().Index}. Mempool: {svc.PendingTransactions.Count} tx(s). " +
+                                              $"LockTx still waiting? {svc.PendingTransactions.Contains(lockTx)}");
+                        }
                         break;
 
                     case "9":

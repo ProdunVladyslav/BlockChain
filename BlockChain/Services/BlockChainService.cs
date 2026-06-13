@@ -22,7 +22,7 @@ namespace BlockChain.Chain
         private readonly double _targetMiningTime = 5; // Target mining time in seconds for dynamic difficulty adjustment
         private readonly int difficultyAdjustmentInterval = 10; // Amount to adjust the difficulty by when mining time is too short or too long
         private readonly int _rateLimitPerSender = 3; // Maximum number of pending transactions allowed per sender to prevent spamming
-        private readonly int _ttlTransactionsSeconds = 10; // Time-to-live for transactions in the mempool (not currently implemented, but could be used to remove old transactions)
+        private readonly int _ttlTransactionsSeconds = 300; // Time-to-live for transactions in the mempool (5 minutes)
 
         private readonly Dictionary<string, decimal> Balances = new Dictionary<string, decimal>(); // Dictionary to track balances of public keys (not currently used in this implementation)
 
@@ -52,6 +52,7 @@ namespace BlockChain.Chain
 
         public void AddTransactionToMempool(Transaction transaction)
         {
+            EvictStaleTransactions(_ttlTransactionsSeconds); // Purge stale transactions before accepting new ones
 
             if (transaction.Fee < NetworkBaseFee)
             {
@@ -63,11 +64,11 @@ namespace BlockChain.Chain
             {
                 var balance = GetBalance(transaction.From);
                 var totalPendingAmount = PendingTransactions.Where(x => x.From == transaction.From).Sum(x => x.Amount + x.Fee);
-                //if (balance < totalPendingAmount + transaction.Amount + transaction.Fee)
-                //{
-                //    Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient funds.");
-                //    return;
-                //}
+                if (balance < totalPendingAmount + transaction.Amount + transaction.Fee)
+                {
+                    Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient funds. Balance={balance}, needed={totalPendingAmount + transaction.Amount + transaction.Fee}.");
+                    return;
+                }
             }
 
             var isValid = TransactionService.ValidateTransaction(transaction); // Validate the transaction using the TransactionService
@@ -90,11 +91,19 @@ namespace BlockChain.Chain
 
         public void MineBlock(string minerPublicKey)
         {
-            EvictStaleTransactions(_ttlTransactionsSeconds); // Remove old transactions from the mempool before mining a new block
-            var transactionsToInclude = new List<Transaction>(PendingTransactions.OrderByDescending(x => x.Fee).Take(MaxTransactionsPerBlock)); // Create a copy of the pending transactions to include in the new block
-            var totalFees = transactionsToInclude.Sum(t => (t.Fee - NetworkBaseFee)); // Calculate the total fees from the transactions to include in the block
+            EvictStaleTransactions(_ttlTransactionsSeconds);
+            // Respect nLockTime
+            var lockedTxCount = PendingTransactions.Count(t => t.LockTime > Chain.Count);
+            if (lockedTxCount > 0)
+                Console.WriteLine($"[LockTime] Holding {lockedTxCount} transaction(s) in mempool until block height {PendingTransactions.Where(t => t.LockTime > Chain.Count).Max(t => t.LockTime)}.");
 
-            var totalReward = _miningReward + totalFees; // Calculate the total reward for mining the block (base reward + transaction fees)
+            var transactionsToInclude = new List<Transaction>(PendingTransactions
+                .Where(t => t.LockTime <= Chain.Count)
+                .OrderByDescending(x => x.Fee) // my codebase already respect fees so i sort by fee (refined 1st task)
+                .Take(MaxTransactionsPerBlock));
+            var totalFees = transactionsToInclude.Sum(t => (t.Fee - NetworkBaseFee)); 
+
+            var totalReward = _miningReward + totalFees;
 
             var rewardTransaction = new Transaction
             (
@@ -109,7 +118,7 @@ namespace BlockChain.Chain
             var lastBlock = Chain.Last();
             Block newBlock = new Block(lastBlock.Index + 1, DateTime.UtcNow, transactionsToInclude, lastBlock.Hash, minerPublicKey, Difficulty);
             newBlock.MerkleRoot = HashingService.BuildMerkleRoot(transactionsToInclude); // Compute the Merkle root for the transactions in the new block
-
+            
             MiningService.MineBlockMultiThreaded(newBlock, Difficulty); // Mine the new block using the MiningService
             Chain.Add(newBlock); // Add the new block to the blockchain
             PendingTransactions.RemoveAll(t => transactionsToInclude.Contains(t)); // Remove the included transactions from the mempool
@@ -320,6 +329,14 @@ namespace BlockChain.Chain
             return balance; // Return the calculated balance
         }
 
+        public void ApplyBlock(Block block)
+        {
+            Chain.Add(block);
+            UpdateBalances(block);
+            var minedTxIds = new HashSet<Guid>(block.Transactions.Select(t => t.Id));
+            PendingTransactions.RemoveAll(t => minedTxIds.Contains(t.Id));
+        }
+
         private void UpdateBalances(Block block)
         {
             foreach (Transaction transaction in block.Transactions)
@@ -488,7 +505,6 @@ namespace BlockChain.Chain
             return min; // one chain is a strict prefix of the other — no real fork
         }
 
-        // Add this to BlockChainService
         public BlockChainService Clone()
         {
             var clone = new BlockChainService(); // builds with a fresh genesis
