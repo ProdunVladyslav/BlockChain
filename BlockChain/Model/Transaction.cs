@@ -28,18 +28,22 @@ namespace BlockChain.Model
         [JsonPropertyName("timestamp")]
         public DateTime Timestamp { get; set; } = DateTime.UtcNow;
 
-        public Transaction(string from, string to, decimal amount, decimal fee)
+        public Transaction(string from, string to, decimal amount, decimal fee, int lockTime = 0)
         {
             Id = Guid.NewGuid();
             From = from;
             To = to;
             Amount = amount;
             Fee = fee;
+            LockTime = lockTime;
         }
+
+        [JsonPropertyName("lockTime")]
+        public int LockTime { get; set; } = 0;
 
         public string ToRawString()
         {
-            return $"{From}{To}{Amount}{Fee}{Timestamp:O}";
+            return $"{From}{To}{Amount}{Fee}{LockTime}{Timestamp:O}";
         }
 
         public override bool Equals(object? obj)
@@ -56,7 +60,7 @@ namespace BlockChain.Model
 
         public override string ToString()
         {
-            return $"Transaction {Id}, From: {From}, To: {To}, Amount: {Amount}, Fee: {Fee}, Timestamp: {Timestamp:O}";
+            return $"Transaction {Id}, From: {From}, To: {To}, Amount: {Amount}, Fee: {Fee}, LockTime: {LockTime}, Timestamp: {Timestamp:O}";
         }
     }
 }

@@ -29,7 +29,7 @@ namespace BlockChain.Services.P2P.Handlers
                     var transactionsValid = newBlock.Transactions.All(tx => TransactionService.ValidateTransaction(tx).isValid);
                     if (hash == newBlock.Hash && lastBlock != null && newBlock.PreviousHash == lastBlock.Hash && transactionsValid)
                     {
-                        _blockChainService.Chain.Add(newBlock);
+                        _blockChainService.ApplyBlock(newBlock);
                         Console.WriteLine($"New block received from {ctx.RemoteEndpoint} and added to chain. Height is now {_blockChainService.Chain.Count}.");
                         _p2pClient.BroadcastBlockAsync(newBlock).GetAwaiter().GetResult();
                     }
