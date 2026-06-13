@@ -1,4 +1,4 @@
-﻿namespace BlockChain.HashingService
+﻿namespace BlockChain.Chain
 {
     public class DisplayService
     {

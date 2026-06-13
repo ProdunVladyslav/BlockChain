@@ -1,4 +1,4 @@
-﻿using BlockChain.HashingService;
+﻿using BlockChain.Chain;
 using BlockChain.Model;
 
 namespace BlockChain.Services
