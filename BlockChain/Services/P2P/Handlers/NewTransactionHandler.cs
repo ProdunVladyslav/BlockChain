@@ -7,10 +7,12 @@ namespace BlockChain.Services.P2P.Handlers
     public class NewTransactionHandler : MessageHandlerBase
     {
         private readonly BlockChainService _blockChainService;
+        private readonly P2PClient _p2pClient;
 
-        public NewTransactionHandler(BlockChainService blockChainService)
+        public NewTransactionHandler(BlockChainService blockChainService, P2PClient p2pClient)
         {
             _blockChainService = blockChainService;
+            _p2pClient = p2pClient;
         }
 
         public override object Handle(object request)
@@ -23,6 +25,8 @@ namespace BlockChain.Services.P2P.Handlers
                 {
                     _blockChainService.AddTransactionToMempool(transaction);
                     Console.WriteLine($"Transaction received from {ctx.RemoteEndpoint} and added to mempool.");
+                    Console.WriteLine("[Gossip] Пересилаю транзакцію іншим вузлам...");
+                    _p2pClient.BroadcastTransactionAsync(transaction).GetAwaiter().GetResult();
                 }
                 return null;
             }
