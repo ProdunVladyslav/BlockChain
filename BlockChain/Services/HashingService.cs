@@ -48,5 +48,94 @@ namespace BlockChain.Chain
             }
             return hashAllTransactions[0]; // Return the final hash, which is the Merkle root of the transaction
         }
+
+        /// <summary>
+        /// Builds a Merkle proof that a specific transaction is contained in a block.
+        /// Returns null if the transaction is not found.
+        /// </summary>
+        public static MerkleProof BuildMerkleProof(Block block, Guid transactionId)
+        {
+            var txIndex = block.Transactions.FindIndex(t => t.Id == transactionId);
+            if (txIndex == -1) return null;
+
+            var tx = block.Transactions[txIndex];
+            var txHash = ComputeHash(tx.ToRawString());
+
+            // Build all levels of the Merkle tree
+            var levels = new List<List<string>>();
+            var currentLevel = block.Transactions.Select(t => ComputeHash(t.ToRawString())).ToList();
+            levels.Add(currentLevel.ToList());
+
+            while (currentLevel.Count > 1)
+            {
+                var nextLevel = new List<string>();
+                for (int i = 0; i < currentLevel.Count; i += 2)
+                {
+                    if (i + 1 < currentLevel.Count)
+                        nextLevel.Add(ComputeHash(currentLevel[i] + currentLevel[i + 1]));
+                    else
+                        nextLevel.Add(currentLevel[i]); // carry forward odd element
+                }
+                levels.Add(nextLevel.ToList());
+                currentLevel = nextLevel;
+            }
+
+            // Walk from leaf up, collecting sibling hashes
+            var steps = new List<ProofStep>();
+            int idx = txIndex;
+
+            for (int level = 0; level < levels.Count - 1; level++)
+            {
+                var sibling = TryGetSibling(levels[level], idx);
+                if (sibling != null)
+                {
+                    steps.Add(new ProofStep
+                    {
+                        SiblingHash = sibling,
+                        // If idx is odd → sibling is the left child → concatenate sibling before our hash
+                        // If idx is even → sibling is the right child → concatenate our hash before sibling
+                        IsLeft = idx % 2 == 1
+                    });
+                }
+                idx /= 2; // move to parent index at next level
+            }
+
+            return new MerkleProof
+            {
+                TransactionId = transactionId,
+                TransactionHash = txHash,
+                MerkleRoot = levels[^1][0],
+                BlockIndex = block.Index,
+                BlockHash = block.Hash,
+                Steps = steps
+            };
+        }
+
+        /// <summary>
+        /// Verifies a Merkle proof against a known transaction.
+        /// </summary>
+        public static bool VerifyMerkleProof(MerkleProof proof, Transaction transaction)
+        {
+            var txHash = ComputeHash(transaction.ToRawString());
+            if (txHash != proof.TransactionHash) return false;
+
+            var currentHash = txHash;
+            foreach (var step in proof.Steps)
+            {
+                currentHash = step.IsLeft
+                    ? ComputeHash(step.SiblingHash + currentHash)
+                    : ComputeHash(currentHash + step.SiblingHash);
+            }
+
+            return currentHash == proof.MerkleRoot;
+        }
+
+        private static string TryGetSibling(List<string> level, int idx)
+        {
+            if (idx % 2 == 0)
+                return idx + 1 < level.Count ? level[idx + 1] : null;
+            else
+                return level[idx - 1];
+        }
     }
 }

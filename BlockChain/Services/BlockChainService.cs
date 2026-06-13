@@ -50,14 +50,21 @@ namespace BlockChain.Chain
             Chain.Add(genesisBlock);
         }
 
-        public void AddTransactionToMempool(Transaction transaction)
+        public bool AddTransactionToMempool(Transaction transaction)
         {
             EvictStaleTransactions(_ttlTransactionsSeconds); // Purge stale transactions before accepting new ones
+
+            var isValid = TransactionService.ValidateTransaction(transaction); // Validate the transaction first (null fields, signature, amount)
+            if (!isValid.isValid)
+            {
+                Console.WriteLine($"Invalid transaction rejected: {isValid.error}");
+                return false;
+            }
 
             if (transaction.Fee < NetworkBaseFee)
             {
                 Console.WriteLine($"Transaction from {transaction.From} rejected: Fee {transaction.Fee} is below the network base fee of {NetworkBaseFee}.");
-                return;
+                return false;
             }
 
             if (transaction.From != "COINBASE")
@@ -67,24 +74,18 @@ namespace BlockChain.Chain
                 if (balance < totalPendingAmount + transaction.Amount + transaction.Fee)
                 {
                     Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient funds. Balance={balance}, needed={totalPendingAmount + transaction.Amount + transaction.Fee}.");
-                    return;
+                    return false;
                 }
             }
 
-            var isValid = TransactionService.ValidateTransaction(transaction); // Validate the transaction using the TransactionService
             var rateLimited = PendingTransactions.Where(x => x.From == transaction.From).Count() >= _rateLimitPerSender; // Simple rate limit: max 5 pending transactions per sender
-            if (isValid.isValid && !rateLimited)
-            {
-                PendingTransactions.Add(transaction);
-            }
-            else if (rateLimited)
+            if (rateLimited)
             {
                 throw new InvalidOperationException("Spam detected.");
             }
-            else
-            {
-                Console.WriteLine($"Invalid transaction from {transaction.From} rejected: {isValid.error}");
-            }
+
+            PendingTransactions.Add(transaction);
+            return true;
         }
 
         public event Action<Block>? BlockMined;

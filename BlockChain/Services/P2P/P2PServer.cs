@@ -14,6 +14,7 @@ namespace BlockChain.Services.P2P
 {
     public class P2PServer
     {
+        public static bool FakeMerkleMode = false; // HW demo: send random MerkleRoot
         public IHandler ChainHead { get; set; }
         private readonly BlockChainService _blockChainService;
         private readonly P2PClient _p2pClient;
@@ -60,6 +61,7 @@ namespace BlockChain.Services.P2P
             {
                 using var stream = client.GetStream();
                 using var reader = new StreamReader(stream);
+                using var writer = new StreamWriter(stream) { AutoFlush = true };
                 client.ReceiveTimeout = 3000;
 
                 var jsonLine = await reader.ReadLineAsync();
@@ -71,7 +73,8 @@ namespace BlockChain.Services.P2P
                 var ctx = new MessageContext
                 {
                     Message = message,
-                    RemoteEndpoint = remoteEndpoint
+                    RemoteEndpoint = remoteEndpoint,
+                    ResponseWriter = writer
                 };
                 ChainHead.Handle(ctx);
             }
