@@ -28,12 +28,16 @@ var newTx = new NewTransactionHandler(blockChainService, p2pClient);
 var requestChain = new RequestChainHandler(p2pClient, blockChainService);
 var newChain = new NewChainHandler(blockChainService, p2pClient, provider.GetRequiredService<StorageService>());
 var newBlock = new NewBlockHandler(blockChainService, p2pClient);
+var requestProof = new RequestProofHandler(blockChainService, p2pClient);
+var requestHeader = new RequestHeaderHandler(blockChainService);
 var unknown = new UnknownMessageHandler();
 
 hello.SetNext(newTx)
      .SetNext(requestChain)
      .SetNext(newChain)
      .SetNext(newBlock)
+     .SetNext(requestProof)
+     .SetNext(requestHeader)
      .SetNext(unknown);
 
 p2pServer.ChainHead = hello;
@@ -91,26 +95,57 @@ if (!int.TryParse(Console.ReadLine(), out int port))
 
 p2pServer.Start(port);
 
+Console.WriteLine("\nSelect node mode:");
+Console.WriteLine("1 - Full Node (mine blocks, validate chain)");
+Console.WriteLine("2 - SPV Client (light wallet, verify via proofs)");
+Console.Write("Choice: ");
+bool isSpvMode = (Console.ReadLine()?.Trim()) == "2";
+
+if (isSpvMode)
+{
+    Console.ForegroundColor = ConsoleColor.Cyan;
+    Console.WriteLine("\n-----------------------------------");
+    Console.WriteLine("  SPV CLIENT MODE ACTIVE");
+    Console.WriteLine("  Light wallet — no full blockchain loaded");
+    Console.WriteLine("  Minimal storage: only your transactions");
+    Console.WriteLine("---------------------------------------");
+    Console.ResetColor();
+}
+
+var spvTransactions = new List<Transaction>();
 bool flag = true;
 
 while (flag)
 {
-    Console.WriteLine("\nMain menu:");
-    Console.WriteLine("1 - Connect to another node");
-    Console.WriteLine("2 - Create and broadcast a transaction");
-    Console.WriteLine("3 - Show mem-pool");
-    Console.WriteLine("4 - Mine block");
-    Console.WriteLine("5 - See block chain");
-    Console.WriteLine("6 - Balance");
-    Console.WriteLine("7 - Save chain to file");
-    Console.WriteLine("8 - Load chain from file");
-    Console.WriteLine("9 - Знайти транзакцію за ID");
-    Console.WriteLine("e - Exit");
-    Console.WriteLine("0 - Run Fork Auditor simulation");
-    Console.WriteLine("a - Simulate Hacker Attack");
-    Console.WriteLine("s - Request chain from peer");
-    Console.WriteLine("t - Run forensic audit test (Task 1 final test)");
-    Console.WriteLine("h - Homework tests");
+    if (isSpvMode)
+    {
+        Console.WriteLine("\nSPV Wallet menu:");
+        Console.WriteLine("1 - Connect to another node");
+        Console.WriteLine("2 - Create and broadcast a transaction");
+        Console.WriteLine("3 - Request SPV proof from network");
+        Console.WriteLine("e - Exit");
+    }
+    else
+    {
+        Console.WriteLine("\nMain menu:");
+        Console.WriteLine("1 - Connect to another node");
+        Console.WriteLine("2 - Create and broadcast a transaction");
+        Console.WriteLine("3 - Show mem-pool");
+        Console.WriteLine("4 - Mine block");
+        Console.WriteLine("5 - See block chain");
+        Console.WriteLine("6 - Balance");
+        Console.WriteLine("7 - Save chain to file");
+        Console.WriteLine("8 - Load chain from file");
+        Console.WriteLine("9 - Знайти транзакцію за ID");
+        Console.WriteLine("e - Exit");
+        Console.WriteLine("0 - Run Fork Auditor simulation");
+        Console.WriteLine("a - Simulate Hacker Attack");
+        Console.WriteLine("s - Request chain from peer");
+        Console.WriteLine("t - Run forensic audit test (Task 1 final test)");
+        Console.WriteLine("h - Homework tests");
+        Console.WriteLine("p - Request SPV Merkle proof");
+        Console.WriteLine("f - Toggle Fake Merkle mode (HW demo)");
+    }
 
     Console.Write("Enter your choice: ");
 
@@ -146,21 +181,31 @@ while (flag)
                 break;
             }
 
-            try
-            {
-                var transaction = TransactionService.CreateTransaction(myWallet.PublicKey, toAddress, amount, fee);
-                TransactionService.SignTransaction(transaction, myWallet.PrivateKey);
-                blockChainService.AddTransactionToMempool(transaction);
-                if (blockChainService.PendingTransactions.Contains(transaction))
+                try
                 {
-                    await p2pClient.BroadcastTransactionAsync(transaction);
-                    Console.WriteLine($"Transaction accepted. ID: {transaction.Id}");
+                    var transaction = TransactionService.CreateTransaction(myWallet.PublicKey, toAddress, amount, fee);
+                    TransactionService.SignTransaction(transaction, myWallet.PrivateKey);
+
+                    if (isSpvMode)
+                    {
+                        // SPV: store locally, no full-chain mempool
+                        spvTransactions.Add(transaction);
+                        await p2pClient.BroadcastTransactionAsync(transaction);
+                        Console.WriteLine($"Transaction created and broadcast. ID: {transaction.Id}");
+                        break;
+                    }
+
+                    blockChainService.AddTransactionToMempool(transaction);
+                    if (blockChainService.PendingTransactions.Contains(transaction))
+                    {
+                        await p2pClient.BroadcastTransactionAsync(transaction);
+                        Console.WriteLine($"Transaction accepted. ID: {transaction.Id}");
+                    }
+                    else
+                    {
+                        Console.WriteLine("Transaction was rejected and not added to mempool.");
+                    }
                 }
-                else
-                {
-                    Console.WriteLine("Transaction was rejected and not added to mempool.");
-                }
-            }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error creating transaction: {ex.Message}");
@@ -168,6 +213,85 @@ while (flag)
             break;
 
         case "3":
+            if (isSpvMode)
+            {
+                // SPV: request proof
+                Console.Write("Enter transaction ID to prove: ");
+                var spvTxInput = Console.ReadLine();
+                if (!Guid.TryParse(spvTxInput, out Guid spvTxId))
+                {
+                    Console.WriteLine("Invalid transaction ID format.");
+                    break;
+                }
+
+                // Request proof from first node
+                Console.Write("Enter first node address (IP:Port) to request proof from: ");
+                var nodeA = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(nodeA) || !nodeA.Contains(':'))
+                {
+                    Console.WriteLine("Invalid address format.");
+                    break;
+                }
+                var partsA = nodeA.Split(':');
+                var proof = await p2pClient.RequestProofAsync(partsA[0], int.Parse(partsA[1]), spvTxId);
+                if (proof == null)
+                {
+                    Console.WriteLine("Failed to get Merkle proof from node.");
+                    break;
+                }
+
+                // Cross-verify MerkleRoot with a second node
+                Console.Write("Enter SECOND node address (IP:Port) to cross-verify MerkleRoot: ");
+                var nodeB = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(nodeB) || !nodeB.Contains(':'))
+                {
+                    Console.WriteLine("Invalid address. Skipping cross-verification.");
+                }
+                else
+                {
+                    var partsB = nodeB.Split(':');
+                    var header = await p2pClient.RequestHeaderAsync(partsB[0], int.Parse(partsB[1]), proof.BlockIndex);
+                    if (header == null)
+                    {
+                        Console.WriteLine($"[SPV ШТОРМ] Не вдалося отримати заголовок блоку #{proof.BlockIndex} " +
+                                          $"від другої ноди {nodeB}! Доказ відхилено.");
+                        break;
+                    }
+
+                    // header[0] = Index, header[1] = MerkleRoot, header[2] = BlockHash
+                    string secondMerkleRoot = header[1];
+                    if (secondMerkleRoot != proof.MerkleRoot)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Red;
+                        Console.WriteLine($"[SPV ШТОРМ] Повна нода {nodeA} намагалася підсунути фейковий корінь Меркла! Доказ відхилено.");
+                        Console.ResetColor();
+                        Console.WriteLine($"  MerkleRoot від {nodeA}: {proof.MerkleRoot[..16]}...");
+                        Console.WriteLine($"  MerkleRoot від {nodeB}: {secondMerkleRoot[..16]}...");
+                        break;
+                    }
+                    Console.WriteLine($"[SPV] Cross-verify passed — MerkleRoot confirmed by second node ✓");
+                }
+
+                // ── Step 3: Look up transaction ──────────────────────
+                var localTx = spvTransactions.FirstOrDefault(t => t.Id == spvTxId);
+                if (localTx == null)
+                {
+                    Console.WriteLine($"Transaction {spvTxId} not found locally. Proof received but cannot verify without tx data.");
+                    Console.WriteLine($"Proof says: block #{proof.BlockIndex}, MerkleRoot: {proof.MerkleRoot[..16]}...");
+                    Console.WriteLine($"Proof steps: {proof.Steps.Count}");
+                    foreach (var step in proof.Steps)
+                        Console.WriteLine($"  Sibling hash: {step.SiblingHash[..16]}... (side: {(step.IsLeft ? "LEFT" : "RIGHT")})");
+                    break;
+                }
+
+                // ── Step 4: Verify Merkle proof ──────────────────────
+                bool valid = HashingService.VerifyMerkleProof(proof, localTx);
+                Console.WriteLine(valid
+                    ? $"✅ PROOF VERIFIED: Transaction {spvTxId} is confirmed in block #{proof.BlockIndex}"
+                    : $"❌ PROOF INVALID: Cannot confirm transaction {spvTxId}");
+                break;
+            }
+
             if (blockChainService.PendingTransactions.Count == 0)
             {
                 Console.WriteLine("Mem-pool is empty.");
@@ -180,19 +304,23 @@ while (flag)
 
 
         case "4":
+            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
             blockChainService.MineBlock(myWallet.PublicKey);
             break;
 
         case "5":
+            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
             displayService.DisplayChain(blockChainService);
             break;
 
         case "6":
+            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
             var balance = blockChainService.GetBalance(myWallet.PublicKey);
             Console.WriteLine($"Your balance: {balance}");
             break;
 
         case "9":
+            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
             Console.Write("Введіть ID транзакції: ");
             var txIdInput = Console.ReadLine();
             if (!Guid.TryParse(txIdInput, out Guid txId))
@@ -277,6 +405,7 @@ while (flag)
             break;
 
         case "0":
+            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
             Console.WriteLine("\n=================================================");
             Console.WriteLine("  FORK AUDITOR — Симуляція мережевого розколу");
             Console.WriteLine("=================================================");
@@ -396,6 +525,7 @@ while (flag)
             break;
 
         case "s":
+            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
             Console.WriteLine("Enter the address of the peer to request chain from (e.g., 127.0.0.1:5001):");
             var chainNodeAddress = Console.ReadLine();
             if (string.IsNullOrWhiteSpace(chainNodeAddress) || !chainNodeAddress.Contains(':'))
@@ -409,6 +539,7 @@ while (flag)
             break;
 
         case "a":
+            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
             Console.WriteLine("HACKER ATTACK SIMULATION");
             var lastBlock = blockChainService.Chain.Last();
             var firstTx = lastBlock.Transactions.FirstOrDefault(t => t.From != "COINBASE");
@@ -425,6 +556,7 @@ while (flag)
             break;
 
         case "t":
+            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
             Console.WriteLine("\n=================================================");
             Console.WriteLine("  TASK 1 FINAL TEST — Forensic Audit Demo");
             Console.WriteLine("=================================================");
@@ -515,6 +647,7 @@ while (flag)
             break;
 
         case "h":
+            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
             bool hwFlag = true;
             while (hwFlag)
             {
@@ -660,6 +793,88 @@ while (flag)
                         break;
                 }
             }
+            break;
+
+        case "p":
+            // Full Node SPV proof request
+            Console.Write("Enter transaction ID to prove: ");
+            var pTxInput = Console.ReadLine();
+            if (!Guid.TryParse(pTxInput, out Guid pTxId))
+            {
+                Console.WriteLine("Invalid transaction ID format.");
+                break;
+            }
+
+            // Try to find the transaction in the chain
+            var pBlock = blockChainService.Chain
+                .FirstOrDefault(b => b.Transactions.Any(t => t.Id == pTxId));
+            Transaction pTx = null;
+            if (pBlock != null)
+            {
+                pTx = pBlock.Transactions.First(t => t.Id == pTxId);
+            }
+            else
+            {
+                pTx = blockChainService.PendingTransactions
+                    .FirstOrDefault(t => t.Id == pTxId);
+            }
+
+            if (pTx == null)
+            {
+                Console.WriteLine("Transaction not found locally.");
+                break;
+            }
+
+            if (pBlock != null)
+            {
+                // Transaction already in a block — build proof locally and verify
+                var localProof = HashingService.BuildMerkleProof(pBlock, pTxId);
+                if (localProof == null)
+                {
+                    Console.WriteLine("Failed to build proof.");
+                    break;
+                }
+                bool verified = HashingService.VerifyMerkleProof(localProof, pTx);
+                Console.WriteLine(verified
+                    ? $"✅ LOCAL PROOF: Transaction {pTxId} is in block #{pBlock.Index} (verified locally)"
+                    : $"❌ LOCAL PROOF FAILED: Transaction data does not match block");
+                Console.WriteLine($"  MerkleRoot: {localProof.MerkleRoot[..16]}...");
+                Console.WriteLine($"  Proof steps: {localProof.Steps.Count}");
+                foreach (var step in localProof.Steps)
+                    Console.WriteLine($"    Sibling: {step.SiblingHash[..Math.Min(16, step.SiblingHash.Length)]}... ({(step.IsLeft ? "LEFT" : "RIGHT")})");
+            }
+            else
+            {
+                // Transaction is in mempool — request proof from a peer
+                Console.Write("Enter node address (IP:Port): ");
+                var pAddr = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(pAddr) || !pAddr.Contains(':'))
+                {
+                    Console.WriteLine("Invalid address format.");
+                    break;
+                }
+                var pParts = pAddr.Split(':');
+                var remoteProof = await p2pClient.RequestProofAsync(pParts[0], int.Parse(pParts[1]), pTxId);
+                if (remoteProof == null)
+                {
+                    Console.WriteLine("Failed to get Merkle proof from node.");
+                    break;
+                }
+                bool remoteValid = HashingService.VerifyMerkleProof(remoteProof, pTx);
+                Console.WriteLine(remoteValid
+                    ? $"✅ REMOTE PROOF VERIFIED: Transaction {pTxId} confirmed in block #{remoteProof.BlockIndex}"
+                    : $"❌ REMOTE PROOF INVALID: Cannot confirm transaction {pTxId}");
+                Console.WriteLine($"  Steps: {remoteProof.Steps.Count}");
+            }
+            break;
+
+        case "f":
+            P2PServer.FakeMerkleMode = !P2PServer.FakeMerkleMode;
+            Console.ForegroundColor = P2PServer.FakeMerkleMode ? ConsoleColor.Red : ConsoleColor.Green;
+            Console.WriteLine(P2PServer.FakeMerkleMode
+                ? "⚠ FAKE MERKLE MODE ENABLED — node will send random MerkleRoots to SPV clients"
+                : "✅ Fake Merkle mode disabled — node is honest again");
+            Console.ResetColor();
             break;
 
         default:

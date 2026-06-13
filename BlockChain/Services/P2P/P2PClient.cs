@@ -109,6 +109,76 @@ namespace BlockChain.Services.P2P
             }
         }
 
+        public async Task<MerkleProof> RequestProofAsync(string ip, int port, Guid txId)
+        {
+            var message = new NetworkMessage("REQUEST_PROOF", txId.ToString());
+            var jsonMessage = System.Text.Json.JsonSerializer.Serialize(message);
+
+            try
+            {
+                using var client = new TcpClient();
+                await client.ConnectAsync(ip, port);
+                using var stream = client.GetStream();
+                using var reader = new StreamReader(stream);
+                using var writer = new StreamWriter(stream) { AutoFlush = true };
+
+                await writer.WriteLineAsync(jsonMessage);
+                Console.WriteLine($"Proof requested for tx {txId} from {ip}:{port}");
+
+                var responseLine = await reader.ReadLineAsync();
+                if (string.IsNullOrEmpty(responseLine)) return null;
+
+                var response = System.Text.Json.JsonSerializer.Deserialize<NetworkMessage>(responseLine);
+                if (response == null || response.Type != "PROOF_RESULT") return null;
+
+                var proof = System.Text.Json.JsonSerializer.Deserialize<MerkleProof>(response.Data);
+                return proof;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error requesting proof from {ip}:{port}: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Requests a block header (MerkleRoot + BlockHash) from a peer for cross-verification.
+        /// Returns null on failure. Response format: "Index|MerkleRoot|BlockHash"
+        /// </summary>
+        public async Task<string[]> RequestHeaderAsync(string ip, int port, int blockIndex)
+        {
+            var message = new NetworkMessage("REQUEST_HEADER", blockIndex.ToString());
+            var jsonMessage = System.Text.Json.JsonSerializer.Serialize(message);
+
+            try
+            {
+                using var client = new TcpClient();
+                await client.ConnectAsync(ip, port);
+                using var stream = client.GetStream();
+                using var reader = new StreamReader(stream);
+                using var writer = new StreamWriter(stream) { AutoFlush = true };
+
+                await writer.WriteLineAsync(jsonMessage);
+                Console.WriteLine($"Header requested for block #{blockIndex} from {ip}:{port}");
+
+                var responseLine = await reader.ReadLineAsync();
+                if (string.IsNullOrEmpty(responseLine)) return null;
+
+                var response = System.Text.Json.JsonSerializer.Deserialize<NetworkMessage>(responseLine);
+                if (response == null || response.Type != "HEADER_RESULT") return null;
+
+                // Format: Index|MerkleRoot|BlockHash
+                var parts = response.Data.Split('|');
+                if (parts.Length < 3) return null;
+                return parts;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error requesting header from {ip}:{port}: {ex.Message}");
+                return null;
+            }
+        }
+
         public async Task BroadcastChainAsync(List<Block> chain)
         {
             var jsonChain = System.Text.Json.JsonSerializer.Serialize(chain);
