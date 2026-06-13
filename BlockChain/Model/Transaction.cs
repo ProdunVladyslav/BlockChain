@@ -42,6 +42,18 @@ namespace BlockChain.Model
             return $"{From}{To}{Amount}{Fee}{Timestamp:O}";
         }
 
+        public override bool Equals(object? obj)
+        {
+            if (obj is Transaction other)
+                return Id == other.Id;
+            return false;
+        }
+
+        public override int GetHashCode()
+        {
+            return Id.GetHashCode();
+        }
+
         public override string ToString()
         {
             return $"Transaction {Id}, From: {From}, To: {To}, Amount: {Amount}, Fee: {Fee}, Timestamp: {Timestamp:O}";

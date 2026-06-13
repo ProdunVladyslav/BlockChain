@@ -24,7 +24,7 @@ var cryptoService = provider.GetRequiredService<CryptoService>();
 var displayService = provider.GetRequiredService<DisplayService>();
 
 var hello = new HelloHandler(p2pClient);
-var newTx = new NewTransactionHandler(blockChainService);
+var newTx = new NewTransactionHandler(blockChainService, p2pClient);
 var requestChain = new RequestChainHandler(p2pClient, blockChainService);
 var newChain = new NewChainHandler(blockChainService, p2pClient, provider.GetRequiredService<StorageService>());
 var newBlock = new NewBlockHandler(blockChainService, p2pClient);
