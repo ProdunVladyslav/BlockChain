@@ -13,7 +13,7 @@ namespace BlockChain.Services
         public static Transaction CreateTransaction(string from, string to, decimal amount, decimal fee)
         {
             var tx = new Transaction(from, to, amount, fee);
-            var validation = ValidateTransaction(tx);
+            var validation = ValidateTransaction(tx, false);
             if (!validation.isValid)
             {
                 throw new InvalidOperationException(validation.error);
@@ -21,7 +21,7 @@ namespace BlockChain.Services
             return tx;
         }
 
-        public static (bool isValid, string error) ValidateTransaction(Transaction transaction)
+        public static (bool isValid, string error) ValidateTransaction(Transaction transaction, bool checkSignature = true)
         {
             if (transaction == null)
                 return (false, "Transaction cannot be null.");
@@ -36,10 +36,15 @@ namespace BlockChain.Services
                 if(transaction.Fee < 0) return (false, "Transaction fee must be non-negative.");
                 return (true, string.Empty);
             }
-            if (transaction.Signature == null || transaction.Signature.Length == 0)
-                return (false, "Transaction must be signed.");
-            if(!cryptoService.VerifySignature(transaction.ToRawString(), transaction.Signature, transaction.From))
-                return (false, "Invalid transaction signature.");
+
+            if (checkSignature)
+            {
+                if (transaction.Signature == null || transaction.Signature.Length == 0)
+                    return (false, "Transaction must be signed.");
+                if (!cryptoService.VerifySignature(transaction.ToRawString(), transaction.Signature, transaction.From))
+                    return (false, "Invalid transaction signature.");
+            }
+            
             if(transaction.Fee < 0) return (false, "Transaction fee must be non-negative.");
             return (true, string.Empty);
         }

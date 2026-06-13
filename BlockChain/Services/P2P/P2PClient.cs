@@ -116,6 +116,19 @@ namespace BlockChain.Services.P2P
         {
             var jsonChain = System.Text.Json.JsonSerializer.Serialize(chain);
             var message = new NetworkMessage("NEW_CHAIN", jsonChain);
+            await SendMessage(message);
+        }
+
+        public async Task BroadcastBlockAsync(Block block)
+        {
+            var jsonBlock = System.Text.Json.JsonSerializer.Serialize(block);
+            var message = new NetworkMessage("NEW_BLOCK", jsonBlock);
+            
+            await SendMessage(message);
+        }
+
+        private async Task SendMessage(NetworkMessage message)
+        {
             var jsonMessage = System.Text.Json.JsonSerializer.Serialize(message);
 
             try

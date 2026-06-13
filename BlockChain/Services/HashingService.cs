@@ -2,7 +2,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace BlockChain.HashingService
+namespace BlockChain.Chain
 {
     public class HashingService
     {

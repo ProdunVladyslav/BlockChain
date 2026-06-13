@@ -1,6 +1,6 @@
 ﻿using BlockChain.Model;
 
-namespace BlockChain.HashingService
+namespace BlockChain.Chain
 {
     public class MiningService
     {
@@ -27,7 +27,12 @@ namespace BlockChain.HashingService
 
             if (foundNonce > -1)
             {
-                Console.WriteLine($"Valid hash found with nonce: {foundNonce}");
+                lock (_consoleLock)
+                {
+                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                    Console.WriteLine($"Valid hash found with nonce: {foundNonce}");
+                    Console.ResetColor();
+                }
                 block.Nonce = foundNonce;
                 block.Hash = HashingService.ComputeHash(block);
                 block.MiningDurationBlock = stopWatch.Elapsed.TotalSeconds; // Store the mining duration in seconds
@@ -66,6 +71,8 @@ namespace BlockChain.HashingService
             }
         }
 
+        private static readonly object _consoleLock = new object();
+
         static void MineBlockThread(Block block, double difficulty, long startNonce, long step, ref long foundNonce, CancellationTokenSource cts)
         {
             int wholePart = (int)difficulty; // Get the whole number part of the difficulty level
@@ -84,7 +91,12 @@ namespace BlockChain.HashingService
                 string hash = HashingService.ComputeHash(rawData); // Compute the hash of the block with the current nonce
                 if (hash.StartsWith(target) && hash[wholePart] <= fractionalChar)
                 {
-                    Console.WriteLine($"Thread {Thread.CurrentThread.ManagedThreadId} found a valid hash!");
+                    lock (_consoleLock)
+                    {
+                        Console.ForegroundColor = ConsoleColor.DarkGray;
+                        Console.WriteLine($"Thread {Thread.CurrentThread.ManagedThreadId} found a valid hash!");
+                        Console.ResetColor();
+                    }
                     Interlocked.CompareExchange(ref foundNonce, nonce, -1);
                     cts.Cancel(); 
                     return; // Exit the thread once a valid hash is found

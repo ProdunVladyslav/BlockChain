@@ -4,7 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace BlockChain.HashingService
+namespace BlockChain.Chain
 {
     public class BlockChainService
     {
@@ -74,11 +74,11 @@ namespace BlockChain.HashingService
             var rateLimited = PendingTransactions.Where(x => x.From == transaction.From).Count() >= _rateLimitPerSender; // Simple rate limit: max 5 pending transactions per sender
             if (isValid.isValid && !rateLimited)
             {
-                PendingTransactions.Add(transaction); // Add the transaction to the mempool if it is valid
+                PendingTransactions.Add(transaction);
             }
             else if (rateLimited)
             {
-                Console.WriteLine($"Transaction from {transaction.From} rejected due to rate limit. Max {_rateLimitPerSender} pending transactions allowed per sender.");
+                throw new InvalidOperationException("Spam detected.");
             }
             else
             {
@@ -90,7 +90,7 @@ namespace BlockChain.HashingService
 
         public void MineBlock(string minerPublicKey)
         {
-            PendingTransactions.RemoveAll(t => t.Timestamp < DateTime.UtcNow.AddSeconds(-_ttlTransactionsSeconds)); // Remove transactions that have exceeded their time-to-live from the mempool
+            EvictStaleTransactions(_ttlTransactionsSeconds); // Remove old transactions from the mempool before mining a new block
             var transactionsToInclude = new List<Transaction>(PendingTransactions.OrderByDescending(x => x.Fee).Take(MaxTransactionsPerBlock)); // Create a copy of the pending transactions to include in the new block
             var totalFees = transactionsToInclude.Sum(t => (t.Fee - NetworkBaseFee)); // Calculate the total fees from the transactions to include in the block
 
@@ -168,6 +168,8 @@ namespace BlockChain.HashingService
 
         public bool IsChainValid(List<Block> chain)
         {
+            var tempBalances = new Dictionary<string, decimal>();
+
             // 1. Empty or missing genesis is invalid
             if (chain == null || chain.Count == 0) return false;
 
@@ -203,6 +205,13 @@ namespace BlockChain.HashingService
                         continue; // coinbase has no signature to verify
                     }
 
+                    if (tx.From != "COINBASE")
+                    {
+                        decimal senderBalance = tempBalances.ContainsKey(tx.From) ? tempBalances[tx.From] : GetBalance(tx.From);
+                        if (senderBalance < tx.Amount + tx.Fee) return false; // Insufficient funds
+                        tempBalances[tx.From] = senderBalance - (tx.Amount + tx.Fee); // Deduct from sender's balance
+                    }
+
                     var (isValid, _) = TransactionService.ValidateTransaction(tx);
                     if (!isValid)
                     {
@@ -210,6 +219,17 @@ namespace BlockChain.HashingService
                         LogSecurityAlert(tx);
                         return false;
                     }
+
+                    if (!tempBalances.ContainsKey(tx.From))
+                    {
+                        tempBalances[tx.From] = 0;
+                    }
+                    if (!tempBalances.ContainsKey(tx.To))
+                    {
+                        tempBalances[tx.To] = 0;
+                    }
+
+                    tempBalances[tx.To] += tx.Amount;
                 }
 
                 // f. Exactly one coinbase per block (no double-rewarding)
@@ -311,6 +331,8 @@ namespace BlockChain.HashingService
                         Balances[transaction.From] = 0;
                     }
                     Balances[transaction.From] -= (transaction.Amount + transaction.Fee); // not + fee - NetworkBaseFee// Subtract the amount from the sender's balance
+                    if (Balances[transaction.From] < 0)
+                        throw new InvalidOperationException($"Negative balance for {transaction.From} after processing transaction {transaction.Id}");
                 }
                 if (!Balances.ContainsKey(transaction.To))
                 {
@@ -447,14 +469,14 @@ namespace BlockChain.HashingService
             Balances.Clear();
             foreach (var block in newChain)
             {
-                UpdateBalances(block);  
+                UpdateBalances(block);
             }
 
             var minedTxIds = new HashSet<Guid>(Chain.SelectMany(b => b.Transactions).Select(t => t.Id));
             PendingTransactions.RemoveAll(t => minedTxIds.Contains(t.Id));
             Chain = newChain;
         }
-        
+
         private static int FindForkIndex(List<Block> oldChain, List<Block> newChain)
         {
             int min = Math.Min(oldChain.Count, newChain.Count);
@@ -544,6 +566,7 @@ namespace BlockChain.HashingService
                 IsChainValid = true,
                 ViolationDetails = new Dictionary<int, List<string>>()
             };
+
             for (int i = 0; i < chain.Count; i++)
             {
                 // 1
@@ -606,6 +629,31 @@ namespace BlockChain.HashingService
             _ => violation
         };
 
+        public int EvictStaleTransactions(int maxAgeSeconds)
+        {
+            int before = PendingTransactions.Count;
+            PendingTransactions.RemoveAll(t => t.Timestamp < DateTime.UtcNow.AddSeconds(-maxAgeSeconds));
+            int after = PendingTransactions.Count;
+            return before - after; // number of evicted transactions
+        }
 
+        public bool ValidateAndRebuildState()
+        {
+            Balances.Clear();
+            try
+            {
+                foreach (var block in Chain)
+                {
+                    UpdateBalances(block);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error during state rebuild: {ex.Message}");
+                Balances.Clear();
+                return false;
+            }
+            return true;
+        }
     }
 }

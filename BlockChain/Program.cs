@@ -1,7 +1,8 @@
-﻿using BlockChain.HashingService;
+﻿using BlockChain.Chain;
 using BlockChain.Model;
 using BlockChain.Services;
 using BlockChain.Services.P2P;
+using BlockChain.Services.P2P.Handlers;
 using Microsoft.Extensions.DependencyInjection;
 
 var service = new ServiceCollection();
@@ -22,13 +23,28 @@ var p2pClient = provider.GetRequiredService<P2PClient>();
 var cryptoService = provider.GetRequiredService<CryptoService>();
 var displayService = provider.GetRequiredService<DisplayService>();
 
+var hello = new HelloHandler(p2pClient);
+var newTx = new NewTransactionHandler(blockChainService);
+var requestChain = new RequestChainHandler(p2pClient, blockChainService);
+var newChain = new NewChainHandler(blockChainService, p2pClient, provider.GetRequiredService<StorageService>());
+var newBlock = new NewBlockHandler(blockChainService, p2pClient);
+var unknown = new UnknownMessageHandler();
+
+hello.SetNext(newTx)
+     .SetNext(requestChain)
+     .SetNext(newChain)
+     .SetNext(newBlock)
+     .SetNext(unknown);
+
+p2pServer.ChainHead = hello;
+
 var myWallet = new Wallet(cryptoService);
 
 // Auto-broadcast chain whenever a block is mined locally
 blockChainService.BlockMined += block =>
 {
-    _ = p2pClient.BroadcastChainAsync(blockChainService.Chain);
-    Console.WriteLine($"[P2P] Auto-broadcast chain after mining block #{block.Index}");
+    _ = p2pClient.BroadcastBlockAsync(block);
+    Console.WriteLine($"[P2P] Auto-broadcast block after mining #{block.Index}");
 };
 
 // TASK 1
@@ -93,6 +109,7 @@ while (flag)
     Console.WriteLine("a - Simulate Hacker Attack");
     Console.WriteLine("s - Request chain from peer");
     Console.WriteLine("t - Run forensic audit test (Task 1 final test)");
+    Console.WriteLine("h - Homework tests");
 
     Console.Write("Enter your choice: ");
 
@@ -443,6 +460,87 @@ while (flag)
                 ? "=== TEST PASSED: system correctly detected and located the 51% attack ==="
                 : "=== TEST FAILED: check the audit logic above ===");
             Console.ResetColor();
+            break;
+
+        case "h":
+            bool hwFlag = true;
+            while (hwFlag)
+            {
+                Console.WriteLine("\nHomework menu:");
+                Console.WriteLine("1 - Стейт, TTL та Антиспам");
+                Console.WriteLine("9 - Back to main menu");
+                Console.Write("Pick HW: ");
+                switch (Console.ReadLine())
+                {
+                    case "1":
+                        Console.WriteLine("\nRunning HW3: State, TTL, Anti-Spam");
+
+                        // --- Scenario 1: ValidateAndRebuildState ---
+                        var svc1 = blockChainService.Clone();
+                        svc1.MineBlock(myWallet.PublicKey);
+                        svc1.MineBlock(myWallet.PublicKey);
+
+                        var txRebuild = TransactionService.CreateTransaction(myWallet.PublicKey, "Alice", 10m, 1m);
+                        TransactionService.SignTransaction(txRebuild, myWallet.PrivateKey);
+                        svc1.AddTransactionToMempool(txRebuild);
+                        svc1.MineBlock(myWallet.PublicKey);
+
+                        Console.WriteLine($"Balance before failure: {svc1.GetBalance(myWallet.PublicKey)}");
+                        svc1.ImitateFailure();
+                        Console.WriteLine($"Balance after failure: {svc1.GetBalance(myWallet.PublicKey)}");
+
+                        bool rebuilt = svc1.ValidateAndRebuildState();
+                        Console.WriteLine($"ValidateAndRebuildState returned: {rebuilt}");
+                        Console.WriteLine($"Balance after rebuild: {svc1.GetBalance(myWallet.PublicKey)}");
+
+                        // --- Scenario 2: EvictStaleTransactions ---
+                        var svc2 = blockChainService.Clone();
+                        var oldTx1 = new Transaction("Sender1", "Receiver", 1m, 0.5m) { Timestamp = DateTime.UtcNow.AddSeconds(-120) };
+                        var oldTx2 = new Transaction("Sender2", "Receiver", 2m, 0.5m) { Timestamp = DateTime.UtcNow.AddSeconds(-120) };
+                        var recentTx = new Transaction("Sender3", "Receiver", 3m, 0.5m) { Timestamp = DateTime.UtcNow };
+
+                        svc2.PendingTransactions.Add(oldTx1);
+                        svc2.PendingTransactions.Add(oldTx2);
+                        svc2.PendingTransactions.Add(recentTx);
+
+                        Console.WriteLine($"Pending before eviction: {svc2.PendingTransactions.Count}");
+                        int evicted = svc2.EvictStaleTransactions(60);
+                        Console.WriteLine($"Evicted {evicted} stale transactions");
+                        Console.WriteLine($"Pending after eviction: {svc2.PendingTransactions.Count}");
+
+                        // --- Scenario 3: Anti-Spam ---
+                        var svc3 = blockChainService.Clone();
+                        svc3.MineBlock(myWallet.PublicKey);
+
+                        string victim = "SpamVictim";
+                        int added = 0;
+                        for (int i = 0; i < 4; i++)
+                        {
+                            var spamTx = TransactionService.CreateTransaction(myWallet.PublicKey, victim, 1m, 1.0m);
+                            TransactionService.SignTransaction(spamTx, myWallet.PrivateKey);
+                            try
+                            {
+                                svc3.AddTransactionToMempool(spamTx);
+                                added++;
+                                Console.WriteLine($"Tx {i+1} added to mempool");
+                            }
+                            catch (InvalidOperationException ex)
+                            {
+                                Console.WriteLine($"Tx {i+1} rejected: {ex.Message}");
+                            }
+                        }
+                        Console.WriteLine($"Total added: {added}, final pending count: {svc3.PendingTransactions.Count}");
+                        break;
+
+                    case "9":
+                        hwFlag = false;
+                        break;
+
+                    default:
+                        Console.WriteLine("Invalid choice.");
+                        break;
+                }
+            }
             break;
 
         default:
