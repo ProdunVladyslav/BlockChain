@@ -1,6 +1,8 @@
 using BlockChain.Chain;
 using BlockChain.Model;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace BlockChain.Services.P2P.Handlers
 {
@@ -34,18 +36,11 @@ namespace BlockChain.Services.P2P.Handlers
                     }
                 }
 
-                if (!_blockChainService.PendingTransactions.Contains(transaction))
+                // Only broadcast if this is a genuinely NEW transaction (not locally created)
+                if (!_blockChainService.PendingTransactions.Any(t => t.Id == transaction.Id))
                 {
-                    if (_blockChainService.AddTransactionToMempool(transaction))
-                    {
-                        Console.WriteLine($"Transaction received from {ctx.RemoteEndpoint} and added to mempool.");
-                        Console.WriteLine("[Gossip] Пересилаю транзакцію іншим вузлам...");
-                        _p2pClient.BroadcastTransactionAsync(transaction).GetAwaiter().GetResult();
-                    }
-                }
-                else
-                {
-                    Console.WriteLine($"[Gossip] Transaction from {ctx.RemoteEndpoint} is already in mempool — broadcasting anyway.");
+                    _blockChainService.AddTransactionToMempool(transaction);
+                    Console.WriteLine($"Transaction received from {ctx.RemoteEndpoint} and added to mempool.");
                     Console.WriteLine("[Gossip] Пересилаю транзакцію іншим вузлам...");
                     _p2pClient.BroadcastTransactionAsync(transaction).GetAwaiter().GetResult();
                 }

@@ -1,6 +1,7 @@
 ﻿using BlockChain.Model;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Sockets;
 using System.Text;
@@ -12,9 +13,38 @@ namespace BlockChain.Services.P2P
     {
         public readonly List<string> _peers = new List<string>();
         public readonly List<string> _peersToRemove = new List<string>();
+        private const string PeersFilePath = "peers.json";
 
 
         public int ListeningPort { get; set; }
+
+        public void SavePeersToFile()
+        {
+            try
+            {
+                var json = System.Text.Json.JsonSerializer.Serialize(_peers);
+                File.WriteAllText(PeersFilePath, json);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error saving peers: {ex.Message}");
+            }
+        }
+
+        public List<string> LoadPeersFromFile()
+        {
+            try
+            {
+                if (!File.Exists(PeersFilePath)) return new List<string>();
+                var json = File.ReadAllText(PeersFilePath);
+                return System.Text.Json.JsonSerializer.Deserialize<List<string>>(json) ?? new List<string>();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error loading peers: {ex.Message}");
+                return new List<string>();
+            }
+        }
 
         public async Task ConnectAsync(string peerAddress)
         {
@@ -52,6 +82,7 @@ namespace BlockChain.Services.P2P
                 await writer.WriteLineAsync(helloJson);
 
                 Console.WriteLine($"Successfully connected to {peerAddress} (advertised our port {ListeningPort})");
+                SavePeersToFile();
             }
             catch (Exception ex)
             {

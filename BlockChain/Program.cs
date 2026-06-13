@@ -114,6 +114,32 @@ if (isSpvMode)
 }
 
 var spvTransactions = new List<Transaction>();
+
+// ── Auto-reconnect to known peers from peers.json ──────────
+Console.WriteLine("\n[Network] Loading saved peers from peers.json...");
+var savedPeers = p2pClient.LoadPeersFromFile();
+if (savedPeers.Count > 0)
+{
+    Console.WriteLine($"[Network] Found {savedPeers.Count} known peer(s). Attempting reconnection...");
+    foreach (var peer in savedPeers)
+    {
+        Console.Write($"  -> {peer} ... ");
+        try
+        {
+            await p2pClient.ConnectAsync(peer);
+            Console.WriteLine("OK");
+        }
+        catch
+        {
+            Console.WriteLine("offline (ignored)");
+        }
+    }
+}
+else
+{
+    Console.WriteLine("[Network] No saved peers found.");
+}
+
 bool flag = true;
 
 while (flag)
@@ -136,12 +162,13 @@ while (flag)
         Console.WriteLine("5 - See block chain");
         Console.WriteLine("6 - Balance");
         Console.WriteLine("7 - Save chain to file");
-        Console.WriteLine("8 - Load chain from file");
+        Console.WriteLine("8 - SPV-перевірка транзакції (Merkle Proof demo)");
         Console.WriteLine("9 - Знайти транзакцію за ID");
         Console.WriteLine("e - Exit");
         Console.WriteLine("0 - Run Fork Auditor simulation");
         Console.WriteLine("a - Simulate Hacker Attack");
         Console.WriteLine("s - Request chain from peer");
+        Console.WriteLine("l - Load chain from file");
         Console.WriteLine("t - Run forensic audit test (Task 1 final test)");
         Console.WriteLine("h - Homework tests");
         Console.WriteLine("p - Request SPV Merkle proof");
@@ -388,21 +415,56 @@ while (flag)
             break;
 
         case "8":
-            Console.Write("Enter file path to load (e.g. chain.json): ");
-            var loadPath = Console.ReadLine();
-            if (string.IsNullOrWhiteSpace(loadPath))
+            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
+
+            Console.WriteLine("\n================================================");
+            Console.WriteLine("  SPV-ПЕРЕВІРКА ТРАНЗАКЦІЇ (Merkle Proof Demo)");
+            Console.WriteLine("================================================");
+
+            // Find a block with at least 2 transactions (coinbase + at least 1 user tx)
+            var spvTargetBlock = blockChainService.Chain
+                .FirstOrDefault(b => b.Transactions.Count >= 2);
+            if (spvTargetBlock == null)
             {
-                Console.WriteLine("Invalid path.");
+                Console.WriteLine("No block with enough transactions found.");
+                Console.WriteLine("Create a transaction and mine a block first.");
                 break;
             }
-            try
+
+            var targetBlock = spvTargetBlock;
+            var targetTx = targetBlock.Transactions.First(t => t.From != "COINBASE");
+            var targetTxHash = HashingService.ComputeHash(targetTx.ToRawString());
+            var expectedRoot = targetBlock.MerkleRoot;
+
+            Console.WriteLine($"\nBlock #{targetBlock.Index}");
+            Console.WriteLine($"  Transactions in block: {targetBlock.Transactions.Count}");
+            Console.WriteLine($"  Target transaction ID: {targetTx.Id}");
+            Console.WriteLine($"  Target tx hash:        {targetTxHash[..24]}...");
+            Console.WriteLine($"  Expected MerkleRoot:   {expectedRoot[..24]}...");
+
+            // Generate proof using the homework method
+            var proofPath = HashingService.GetMerkleProof(
+                targetBlock.Transactions,
+                targetTx.Id.ToString());
+
+            Console.WriteLine($"\nMerkle Proof Hash Path ({proofPath.Count} steps):");
+            for (int i = 0; i < proofPath.Count; i++)
             {
-                blockChainService.LoadFromFile(loadPath);
+                string side = proofPath[i][0] == 'L' ? "LEFT" : "RIGHT";
+                string hash = proofPath[i].Substring(2);
+                Console.WriteLine($"  Step {i + 1}: [{side,5}] {hash[..24]}...");
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error loading chain: {ex.Message}");
-            }
+
+            // Verify using the homework method
+            bool spvResult = HashingService.VerifyMerkleProof(
+                targetTxHash,
+                proofPath,
+                expectedRoot);
+
+            Console.ForegroundColor = spvResult ? ConsoleColor.Green : ConsoleColor.Red;
+            Console.WriteLine($"\n[SPV Verification Passed: {spvResult}] {(spvResult ? "✅" : "❌")}");
+            Console.ResetColor();
+            Console.WriteLine("  (Transaction IS in the block — proof is valid)");
             break;
 
         case "0":
@@ -793,6 +855,25 @@ while (flag)
                         Console.WriteLine("Invalid choice.");
                         break;
                 }
+            }
+            break;
+
+        case "l":
+            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
+            Console.Write("Enter file path to load (e.g. chain.json): ");
+            var loadPath = Console.ReadLine();
+            if (string.IsNullOrWhiteSpace(loadPath))
+            {
+                Console.WriteLine("Invalid path.");
+                break;
+            }
+            try
+            {
+                blockChainService.LoadFromFile(loadPath);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error loading chain: {ex.Message}");
             }
             break;
 

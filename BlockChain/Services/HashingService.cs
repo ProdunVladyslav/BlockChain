@@ -137,5 +137,88 @@ namespace BlockChain.Chain
             else
                 return level[idx - 1];
         }
+
+        // ═══════════════════════════════════════════════════════════════
+        // Homework: SPV simplified Merkle proof methods
+        // ═══════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// Builds a Merkle proof path (list of sibling hashes) for a target transaction.
+        /// Each entry encodes the sibling hash and whether it was on the LEFT side:
+        ///   "L:{hash}"  — sibling was on the left, so concatenate: hash(sibling + current)
+        ///   "R:{hash}"  — sibling was on the right, so concatenate: hash(current + sibling)
+        /// Returns empty list if transaction not found.
+        /// </summary>
+        public static List<string> GetMerkleProof(List<Transaction> transactions, string targetTxId)
+        {
+            if (!Guid.TryParse(targetTxId, out Guid txGuid))
+                return new List<string>();
+
+            int txIndex = transactions.FindIndex(t => t.Id == txGuid);
+            if (txIndex == -1) return new List<string>();
+
+            // Build all levels of the Merkle tree
+            var levels = new List<List<string>>();
+            var currentLevel = transactions.Select(t => ComputeHash(t.ToRawString())).ToList();
+            levels.Add(currentLevel.ToList());
+
+            while (currentLevel.Count > 1)
+            {
+                var nextLevel = new List<string>();
+                for (int i = 0; i < currentLevel.Count; i += 2)
+                {
+                    if (i + 1 < currentLevel.Count)
+                        nextLevel.Add(ComputeHash(currentLevel[i] + currentLevel[i + 1]));
+                    else
+                        nextLevel.Add(currentLevel[i]); // carry forward odd element
+                }
+                levels.Add(nextLevel.ToList());
+                currentLevel = nextLevel;
+            }
+
+            // Walk from leaf up, collecting sibling hashes with side info
+            var proof = new List<string>();
+            int idx = txIndex;
+
+            for (int level = 0; level < levels.Count - 1; level++)
+            {
+                string sibling = TryGetSibling(levels[level], idx);
+                if (sibling != null)
+                {
+                    // Encode side: "L:" = sibling on left, "R:" = sibling on right
+                    string prefix = (idx % 2 == 1) ? "L:" : "R:";
+                    proof.Add(prefix + sibling);
+                }
+                idx /= 2; // move to parent index
+            }
+
+            return proof;
+        }
+
+        /// <summary>
+        /// Verifies a Merkle proof.
+        /// txHash — hash of the target transaction
+        /// proof — list of encoded sibling hashes ("L:..." or "R:...")
+        /// expectedMerkleRoot — the expected Merkle root of the block
+        /// </summary>
+        public static bool VerifyMerkleProof(string txHash, List<string> proof, string expectedMerkleRoot)
+        {
+            string current = txHash;
+
+            foreach (string entry in proof)
+            {
+                if (entry.Length < 2 || (entry[0] != 'L' && entry[0] != 'R') || entry[1] != ':')
+                    return false; // malformed entry
+
+                string siblingHash = entry.Substring(2);
+                bool isLeft = entry[0] == 'L';
+
+                current = isLeft
+                    ? ComputeHash(siblingHash + current)   // sibling LEFT, so sibling + current
+                    : ComputeHash(current + siblingHash);  // sibling RIGHT, so current + sibling
+            }
+
+            return current == expectedMerkleRoot;
+        }
     }
 }
