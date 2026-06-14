@@ -5,6 +5,9 @@ using BlockChain.Services;
 using BlockChain.Services.P2P;
 using BlockChain.Services.P2P.Handlers;
 using Microsoft.Extensions.DependencyInjection;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 
 var service = new ServiceCollection();
 service.AddSingleton<BlockChainService>();
@@ -15,6 +18,7 @@ service.AddSingleton<P2PServer>();
 service.AddSingleton<HashingService>();
 service.AddSingleton<MiningService>();
 service.AddSingleton<StorageService>();
+service.AddSingleton<ColdWalletService>();
 
 var provider = service.BuildServiceProvider();
 
@@ -31,6 +35,8 @@ var newChain = new NewChainHandler(blockChainService, p2pClient, provider.GetReq
 var newBlock = new NewBlockHandler(blockChainService, p2pClient);
 var requestProof = new RequestProofHandler(blockChainService, p2pClient);
 var requestHeader = new RequestHeaderHandler(blockChainService);
+var requestMempool = new RequestMempoolHandler(blockChainService);
+var syncMempool = new SyncMempoolHandler(blockChainService);
 var unknown = new UnknownMessageHandler();
 
 hello.SetNext(newTx)
@@ -39,11 +45,74 @@ hello.SetNext(newTx)
      .SetNext(newBlock)
      .SetNext(requestProof)
      .SetNext(requestHeader)
+     .SetNext(requestMempool)
+     .SetNext(syncMempool)
      .SetNext(unknown);
 
 p2pServer.ChainHead = hello;
 
-var myWallet = new Wallet(cryptoService);
+static string ReadPassword()
+{
+    var sb = new StringBuilder();
+    while (true)
+    {
+        var key = Console.ReadKey(intercept: true);
+        if (key.Key == ConsoleKey.Enter)
+        {
+            Console.WriteLine();
+            break;
+        }
+        if (key.Key == ConsoleKey.Backspace)
+        {
+            if (sb.Length > 0)
+            {
+                sb.Length--;
+                Console.Write("\b \b");
+            }
+        }
+        else
+        {
+            sb.Append(key.KeyChar);
+            Console.Write('*');
+        }
+    }
+    return sb.ToString();
+}
+
+Wallet myWallet;
+if (File.Exists("wallet.json"))
+{
+    Console.Write("Enter wallet password: ");
+    var password = ReadPassword();
+    try
+    {
+        myWallet = WalletStorageService.LoadWallet(password, cryptoService);
+        Console.WriteLine("[Wallet] Loaded encrypted wallet successfully.");
+    }
+    catch (CryptographicException)
+    {
+        Console.WriteLine("[Wallet] Incorrect password. Exiting.");
+        return;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[Wallet] Error loading wallet: {ex.Message}. Exiting.");
+        return;
+    }
+}
+else
+{
+    Console.Write("Create new wallet. Enter password: ");
+    var password = ReadPassword();
+    if (string.IsNullOrWhiteSpace(password))
+    {
+        Console.WriteLine("[Wallet] Password cannot be empty. Exiting.");
+        return;
+    }
+    myWallet = new Wallet(cryptoService);
+    WalletStorageService.SaveWallet(myWallet, password);
+    Console.WriteLine("[Wallet] New wallet created and encrypted.");
+}
 
 // Auto-broadcast chain whenever a block is mined locally
 blockChainService.BlockMined += block =>
@@ -126,8 +195,16 @@ if (savedPeers.Count > 0)
         Console.Write($"  -> {peer} ... ");
         try
         {
-            await p2pClient.ConnectAsync(peer);
-            Console.WriteLine("OK");
+            var syncedMempool = await p2pClient.RequestFullSyncAsync(peer, !isSpvMode);
+            if (syncedMempool != null)
+            {
+                int added = blockChainService.MergeMempool(syncedMempool);
+                Console.WriteLine($"OK (merged {added} mempool tx(s))");
+            }
+            else
+            {
+                Console.WriteLine("offline (ignored)");
+            }
         }
         catch
         {
@@ -144,79 +221,430 @@ bool flag = true;
 
 while (flag)
 {
+    PrintStatusHeader();
+
     if (isSpvMode)
     {
-        Console.WriteLine("\nSPV Wallet menu:");
-        Console.WriteLine("1 - Connect to another node");
-        Console.WriteLine("2 - Create and broadcast a transaction");
-        Console.WriteLine("3 - Request SPV proof from network");
-        Console.WriteLine("e - Exit");
+        PrintSpvMainMenu();
     }
     else
     {
-        Console.WriteLine("\nMain menu:");
-        Console.WriteLine("1 - Connect to another node");
-        Console.WriteLine("2 - Create and broadcast a transaction");
-        Console.WriteLine("3 - Show mem-pool");
-        Console.WriteLine("4 - Mine block");
-        Console.WriteLine("5 - See block chain");
-        Console.WriteLine("6 - Balance");
-        Console.WriteLine("7 - Save chain to file");
-        Console.WriteLine("8 - SPV-перевірка транзакції (Merkle Proof demo)");
-        Console.WriteLine("9 - Знайти транзакцію за ID");
-        Console.WriteLine("e - Exit");
-        Console.WriteLine("0 - Run Fork Auditor simulation");
-        Console.WriteLine("a - Simulate Hacker Attack");
-        Console.WriteLine("s - Request chain from peer");
-        Console.WriteLine("l - Load chain from file");
-        Console.WriteLine("t - Run forensic audit test (Task 1 final test)");
-        Console.WriteLine("h - Homework tests");
-        Console.WriteLine("p - Request SPV Merkle proof");
-        Console.WriteLine("f - Toggle Fake Merkle mode (HW demo)");
+        PrintFullMainMenu();
     }
 
     Console.Write("Enter your choice: ");
+    var choice = Console.ReadLine()?.Trim().ToLowerInvariant();
 
-    switch (Console.ReadLine())
+    switch (choice)
     {
-        case "1":
-
-            Console.WriteLine("Enter the address of the peer to connect to (e.g., 127.0.0.1:5001):");
-            var nodeAddress = Console.ReadLine();
-            if (string.IsNullOrWhiteSpace(nodeAddress) || !nodeAddress.Contains(':'))
-            {
-                Console.WriteLine("Invalid address format. Please use IP:Port format.");
-                break;
-            }
-            await p2pClient.ConnectAsync(nodeAddress);
+        case "n":
+        case "network":
+            await ShowNetworkMenu();
             break;
+        case "w":
+        case "wallet":
+            ShowWalletMenu();
+            break;
+        case "t":
+        case "transactions":
+        case "tx":
+            await ShowTransactionsMenu();
+            break;
+        case "m":
+        case "mining":
+            if (isSpvMode) { Console.WriteLine("Mining is not available in SPV mode."); break; }
+            ShowMiningMenu();
+            break;
+        case "b":
+        case "blockchain":
+            if (isSpvMode) { Console.WriteLine("Blockchain tools are not available in SPV mode."); break; }
+            await ShowBlockchainMenu();
+            break;
+        case "d":
+        case "demos":
+        case "tests":
+            if (isSpvMode) { Console.WriteLine("Demos and tests are not available in SPV mode."); break; }
+            ShowDemosMenu();
+            break;
+        case "s":
+        case "storage":
+            if (isSpvMode) { Console.WriteLine("Storage is not available in SPV mode."); break; }
+            ShowStorageMenu();
+            break;
+        case "h":
+        case "help":
+            ShowHelp();
+            break;
+        case "x":
+        case "exit":
+        case "q":
+        case "quit":
+            Console.WriteLine("Exiting...");
+            flag = false;
+            break;
+        default:
+            Console.WriteLine("Invalid choice. Please try again.");
+            break;
+    }
+}
 
-        case "2":
-            Console.Write("Enter an address of receiver: ");
-            var toAddress = Console.ReadLine();
+void PrintStatusHeader()
+{
+    var mode = isSpvMode ? "SPV Client" : "Full Node";
+    var height = blockChainService.Chain.Count.ToString();
+    var pk = myWallet.PublicKey;
+    var shortPk = pk.Length > 16 ? pk[..16] + "..." : pk;
+    Console.WriteLine("\n==================================");
+    Console.WriteLine($"Wallet: {shortPk}");
+    Console.WriteLine($"Mode:   {mode}");
+    Console.WriteLine($"Height: {height}");
+    Console.WriteLine("==================================");
+}
 
-            Console.Write("Enter the amount to send: ");
-            if (!decimal.TryParse(Console.ReadLine(), out decimal amount))
-            {
-                Console.WriteLine("Invalid amount.");
+void PrintFullMainMenu()
+{
+    Console.WriteLine("\n=== MAIN MENU ===");
+    Console.WriteLine("[N] Network          - peers, sync, chain requests");
+    Console.WriteLine("[W] Wallet           - balances, NFTs, private key");
+    Console.WriteLine("[T] Transactions     - send, mint, mempool, cold wallet");
+    Console.WriteLine("[M] Mining           - mine block, fee summary");
+    Console.WriteLine("[B] Blockchain       - explorer, audits, forensic, attacks");
+    Console.WriteLine("[D] Demos & Tests    - SPV, fake Merkle, homework");
+    Console.WriteLine("[S] Storage          - save/load chain");
+    Console.WriteLine("[H] Help             - show keys and shortcuts");
+    Console.WriteLine("[X] Exit");
+}
+
+void PrintSpvMainMenu()
+{
+    Console.WriteLine("\n=== SPV WALLET MENU ===");
+    Console.WriteLine("[N] Network          - connect to peers, request proofs");
+    Console.WriteLine("[W] Wallet           - private key");
+    Console.WriteLine("[T] Transactions     - create and broadcast");
+    Console.WriteLine("[H] Help             - show keys and shortcuts");
+    Console.WriteLine("[X] Exit");
+}
+
+void ShowHelp()
+{
+    Console.WriteLine("\n=== HELP ===");
+    Console.WriteLine("Type the letter in brackets to open a submenu.");
+    Console.WriteLine("Inside submenus, type the number then press Enter.");
+    Console.WriteLine("Type 'x' at any submenu to go back.");
+    Console.WriteLine("In SPV Client mode only Network, Wallet, Transactions, Help and Exit are available.");
+}
+
+async Task ShowNetworkMenu()
+{
+    bool menuFlag = true;
+    while (menuFlag)
+    {
+        Console.WriteLine("\n=== Network menu ===");
+        Console.WriteLine("1 - Connect to another node");
+        if (isSpvMode)
+        {
+            Console.WriteLine("2 - Request SPV proof from network");
+        }
+        else
+        {
+            Console.WriteLine("2 - Request chain from peer");
+        }
+        Console.WriteLine("x - Back to main menu");
+        Console.Write("Pick option: ");
+
+        switch (Console.ReadLine()?.Trim().ToLowerInvariant())
+        {
+            case "1":
+                Console.WriteLine("Enter the address of the peer to connect to (e.g., 127.0.0.1:5001):");
+                var nodeAddress = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(nodeAddress) || !nodeAddress.Contains(':'))
+                {
+                    Console.WriteLine("Invalid address format. Please use IP:Port format.");
+                    break;
+                }
+                var syncedMempool = await p2pClient.RequestFullSyncAsync(nodeAddress, !isSpvMode);
+                if (syncedMempool != null)
+                {
+                    int added = blockChainService.MergeMempool(syncedMempool);
+                    Console.WriteLine($"[Sync] Merged {added} mempool transaction(s) from {nodeAddress}");
+                }
                 break;
-            }
 
-            Console.Write("Enter the fee: ");
-            if (!decimal.TryParse(Console.ReadLine(), out decimal fee))
-            {
-                Console.WriteLine("Invalid fee.");
+            case "2":
+                if (isSpvMode)
+                {
+                    Console.Write("Enter transaction ID to prove: ");
+                    var spvTxInput = Console.ReadLine();
+                    if (!Guid.TryParse(spvTxInput, out Guid spvTxId))
+                    {
+                        Console.WriteLine("Invalid transaction ID format.");
+                        break;
+                    }
+
+                    Console.Write("Enter first node address (IP:Port) to request proof from: ");
+                    var nodeA = Console.ReadLine();
+                    if (string.IsNullOrWhiteSpace(nodeA) || !nodeA.Contains(':'))
+                    {
+                        Console.WriteLine("Invalid address format.");
+                        break;
+                    }
+                    var partsA = nodeA.Split(':');
+                    var proof = await p2pClient.RequestProofAsync(partsA[0], int.Parse(partsA[1]), spvTxId);
+                    if (proof == null)
+                    {
+                        Console.WriteLine("Failed to get Merkle proof from node.");
+                        break;
+                    }
+
+                    Console.Write("Enter SECOND node address (IP:Port) to cross-verify MerkleRoot: ");
+                    var nodeB = Console.ReadLine();
+                    if (string.IsNullOrWhiteSpace(nodeB) || !nodeB.Contains(':'))
+                    {
+                        Console.WriteLine("Invalid address. Skipping cross-verification.");
+                    }
+                    else
+                    {
+                        var partsB = nodeB.Split(':');
+                        var header = await p2pClient.RequestHeaderAsync(partsB[0], int.Parse(partsB[1]), proof.BlockIndex);
+                        if (header == null)
+                        {
+                            Console.WriteLine($"[SPV ШТОРМ] Не вдалося отримати заголовок блоку #{proof.BlockIndex} " +
+                                              $"від другої ноди {nodeB}! Доказ відхилено.");
+                            break;
+                        }
+
+                        string secondMerkleRoot = header[1];
+                        if (secondMerkleRoot != proof.MerkleRoot)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Red;
+                            Console.WriteLine($"[SPV ШТОРМ] Повна нода {nodeA} намагалася підсунути фейковий корінь Меркла! Доказ відхилено.");
+                            Console.ResetColor();
+                            Console.WriteLine($"  MerkleRoot від {nodeA}: {proof.MerkleRoot[..16]}...");
+                            Console.WriteLine($"  MerkleRoot від {nodeB}: {secondMerkleRoot[..16]}...");
+                            break;
+                        }
+                        Console.WriteLine($"[SPV] Cross-verify passed — MerkleRoot confirmed by second node ✓");
+                    }
+
+                    var localTx = spvTransactions.FirstOrDefault(t => t.Id == spvTxId);
+                    if (localTx == null)
+                    {
+                        Console.WriteLine($"Transaction {spvTxId} not found locally. Proof received but cannot verify without tx data.");
+                        Console.WriteLine($"Proof says: block #{proof.BlockIndex}, MerkleRoot: {proof.MerkleRoot[..16]}...");
+                        Console.WriteLine($"Proof steps: {proof.Steps.Count}");
+                        foreach (var step in proof.Steps)
+                            Console.WriteLine($"  Sibling hash: {step.SiblingHash[..16]}... (side: {(step.IsLeft ? "LEFT" : "RIGHT")})");
+                        break;
+                    }
+
+                    bool valid = HashingService.VerifyMerkleProof(proof, localTx);
+                    Console.WriteLine(valid
+                        ? $"✅ PROOF VERIFIED: Transaction {spvTxId} is confirmed in block #{proof.BlockIndex}"
+                        : $"❌ PROOF INVALID: Cannot confirm transaction {spvTxId}");
+                    break;
+                }
+
+                Console.WriteLine("Enter the address of the peer to request chain from (e.g., 127.0.0.1:5001):");
+                var chainNodeAddress = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(chainNodeAddress) || !chainNodeAddress.Contains(':'))
+                {
+                    Console.WriteLine("Invalid address format. Please use IP:Port format.");
+                    break;
+                }
+                var parts = chainNodeAddress.Split(':');
+                await p2pClient.RequestChainAsync(parts[0], int.Parse(parts[1]));
+                Console.WriteLine("Chain request sent.");
                 break;
-            }
+
+            case "x":
+                menuFlag = false;
+                break;
+
+            default:
+                Console.WriteLine("Invalid network choice.");
+                break;
+        }
+    }
+}
+
+void ShowWalletMenu()
+{
+    bool menuFlag = true;
+    while (menuFlag)
+    {
+        Console.WriteLine("\n=== Wallet menu ===");
+        if (!isSpvMode)
+        {
+            Console.WriteLine("1 - MAIN balance");
+            Console.WriteLine("2 - All balances");
+            Console.WriteLine("3 - My NFTs");
+            Console.WriteLine("4 - Reveal private key (password required)");
+        }
+        else
+        {
+            Console.WriteLine("1 - Reveal private key (password required)");
+        }
+        Console.WriteLine("x - Back to main menu");
+        Console.Write("Pick option: ");
+
+        switch (Console.ReadLine()?.Trim().ToLowerInvariant())
+        {
+            case "1":
+                if (!isSpvMode)
+                {
+                    var mainBalance = blockChainService.GetBalance(myWallet.PublicKey, "MAIN");
+                    var academyBalance = blockChainService.GetBalance(myWallet.PublicKey, "ACADEMY_COIN");
+                    Console.WriteLine($"Your MAIN balance:        {mainBalance}");
+                    Console.WriteLine($"Your ACADEMY_COIN balance: {academyBalance}");
+                }
+                else
+                {
+                    Console.Write("Enter wallet password to reveal private key: ");
+                    var revealPassword = ReadPassword();
+                    try
+                    {
+                        var revealedKey = WalletStorageService.RevealPrivateKey(revealPassword);
+                        Console.WriteLine("Private key:");
+                        Console.WriteLine(revealedKey);
+                    }
+                    catch (CryptographicException)
+                    {
+                        Console.WriteLine("[Wallet] Incorrect password. Private key not revealed.");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Wallet] Error revealing private key: {ex.Message}");
+                    }
+                }
+                break;
+
+            case "2":
+                if (isSpvMode) { Console.WriteLine("Invalid choice."); break; }
+                var allBalances = blockChainService.GetAllBalances(myWallet.PublicKey);
+                if (allBalances.Count == 0)
+                {
+                    Console.WriteLine("No balances found.");
+                }
+                else
+                {
+                    Console.WriteLine("All balances:");
+                    foreach (var kvp in allBalances)
+                    {
+                        Console.WriteLine($"  {kvp.Key}: {kvp.Value}");
+                    }
+                }
+                break;
+
+            case "3":
+                if (isSpvMode) { Console.WriteLine("Invalid choice."); break; }
+
+                BlockChainExplorer? nftExplorer = null;
+                try
+                {
+                    nftExplorer = new BlockChainExplorer(blockChainService);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Could not open explorer: {ex.Message}");
+                    break;
+                }
+
+                var ownedNfts = nftExplorer.GetOwnedNFTs(myWallet.PublicKey);
+                if (ownedNfts.Count == 0)
+                {
+                    Console.WriteLine("You do not own any NFTs.");
+                }
+                else
+                {
+                    Console.WriteLine($"Your NFTs ({ownedNfts.Count}):");
+                    foreach (var url in ownedNfts)
+                    {
+                        Console.WriteLine($"  - {url}");
+                    }
+                }
+                break;
+
+            case "4":
+                if (isSpvMode) { Console.WriteLine("Invalid choice."); break; }
+                Console.Write("Enter wallet password to reveal private key: ");
+                var revealPassword2 = ReadPassword();
+                try
+                {
+                    var revealedKey = WalletStorageService.RevealPrivateKey(revealPassword2);
+                    Console.WriteLine("Private key:");
+                    Console.WriteLine(revealedKey);
+                }
+                catch (CryptographicException)
+                {
+                    Console.WriteLine("[Wallet] Incorrect password. Private key not revealed.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Wallet] Error revealing private key: {ex.Message}");
+                }
+                break;
+
+            case "x":
+                menuFlag = false;
+                break;
+
+            default:
+                Console.WriteLine("Invalid wallet choice.");
+                break;
+        }
+    }
+}
+
+async Task ShowTransactionsMenu()
+{
+    bool menuFlag = true;
+    while (menuFlag)
+    {
+        Console.WriteLine("\n=== Transactions menu ===");
+        Console.WriteLine("1 - Create and broadcast a transaction");
+        if (!isSpvMode)
+        {
+            Console.WriteLine("2 - Mint token");
+            Console.WriteLine("3 - Mint NFT");
+            Console.WriteLine("4 - Show mem-pool");
+            Console.WriteLine("5 - Create offline transaction (Cold Wallet)");
+            Console.WriteLine("6 - Broadcast transaction from file");
+        }
+        Console.WriteLine("x - Back to main menu");
+        Console.Write("Pick option: ");
+
+        switch (Console.ReadLine()?.Trim().ToLowerInvariant())
+        {
+            case "1":
+                Console.Write("Enter an address of receiver: ");
+                var toAddress = Console.ReadLine();
+
+                Console.Write("Enter token symbol (default MAIN): ");
+                var tokenSymbol = Console.ReadLine()?.Trim();
+                if (string.IsNullOrWhiteSpace(tokenSymbol))
+                    tokenSymbol = "MAIN";
+
+                Console.Write("Enter the amount to send: ");
+                if (!decimal.TryParse(Console.ReadLine(), out decimal amount))
+                {
+                    Console.WriteLine("Invalid amount.");
+                    break;
+                }
+
+                Console.Write("Enter the fee (always paid in MAIN): ");
+                if (!decimal.TryParse(Console.ReadLine(), out decimal fee))
+                {
+                    Console.WriteLine("Invalid fee.");
+                    break;
+                }
 
                 try
                 {
-                    var transaction = TransactionService.CreateTransaction(myWallet.PublicKey, toAddress, amount, fee);
+                    var transaction = TransactionService.CreateTransaction(myWallet.PublicKey, toAddress, amount, fee, tokenSymbol);
                     TransactionService.SignTransaction(transaction, myWallet.PrivateKey);
 
                     if (isSpvMode)
                     {
-                        // SPV: store locally, no full-chain mempool
                         spvTransactions.Add(transaction);
                         await p2pClient.BroadcastTransactionAsync(transaction);
                         Console.WriteLine($"Transaction created and broadcast. ID: {transaction.Id}");
@@ -234,733 +662,1044 @@ while (flag)
                         Console.WriteLine("Transaction was rejected and not added to mempool.");
                     }
                 }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error creating transaction: {ex.Message}");
-            }
-            break;
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error creating transaction: {ex.Message}");
+                }
+                break;
 
-        case "3":
-            if (isSpvMode)
-            {
-                // SPV: request proof
+            case "2":
+                if (isSpvMode) { Console.WriteLine("Invalid choice."); break; }
+
+                Console.Write("Enter token symbol to mint (e.g., ACADEMY_COIN): ");
+                var mintToken = Console.ReadLine()?.Trim();
+                if (string.IsNullOrWhiteSpace(mintToken))
+                {
+                    Console.WriteLine("Token symbol cannot be empty.");
+                    break;
+                }
+                if (mintToken == "MAIN")
+                {
+                    Console.WriteLine("MAIN cannot be minted directly.");
+                    break;
+                }
+
+                Console.Write("Enter the amount to mint: ");
+                if (!decimal.TryParse(Console.ReadLine(), out decimal mintAmount))
+                {
+                    Console.WriteLine("Invalid amount.");
+                    break;
+                }
+
+                try
+                {
+                    var mintTx = TransactionService.CreateTransaction("MINT", myWallet.PublicKey, mintAmount, 0m, mintToken);
+                    blockChainService.AddTransactionToMempool(mintTx);
+                    if (blockChainService.PendingTransactions.Contains(mintTx))
+                    {
+                        await p2pClient.BroadcastTransactionAsync(mintTx);
+                        Console.WriteLine($"Mint transaction accepted. Token={mintToken}, Amount={mintAmount}, ID={mintTx.Id}. Mine a block to finalize.");
+                    }
+                    else
+                    {
+                        Console.WriteLine("Mint transaction was rejected.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error creating mint transaction: {ex.Message}");
+                }
+                break;
+
+            case "3":
+                if (isSpvMode) { Console.WriteLine("Invalid choice."); break; }
+
+                Console.Write("Enter NFT data URL (image or metadata): ");
+                var nftUrl = Console.ReadLine()?.Trim();
+                if (string.IsNullOrWhiteSpace(nftUrl))
+                {
+                    Console.WriteLine("NFT data URL cannot be empty.");
+                    break;
+                }
+
+                Console.Write("Enter token symbol for the NFT (default NFT): ");
+                var nftToken = Console.ReadLine()?.Trim();
+                if (string.IsNullOrWhiteSpace(nftToken))
+                    nftToken = "NFT";
+
+                try
+                {
+                    var nftTx = TransactionService.CreateTransaction("MINT", myWallet.PublicKey, 1, 0m, nftToken, type: TransactionType.MINT_NFT, nftDataUrl: nftUrl);
+                    blockChainService.AddTransactionToMempool(nftTx);
+                    if (blockChainService.PendingTransactions.Contains(nftTx))
+                    {
+                        await p2pClient.BroadcastTransactionAsync(nftTx);
+                        Console.WriteLine($"NFT mint transaction accepted. URL={nftUrl}, Token={nftToken}, ID={nftTx.Id}. Mine a block to finalize.");
+                    }
+                    else
+                    {
+                        Console.WriteLine("NFT mint transaction was rejected.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error creating NFT mint transaction: {ex.Message}");
+                }
+                break;
+
+            case "4":
+                if (isSpvMode) { Console.WriteLine("Invalid choice."); break; }
+                if (blockChainService.PendingTransactions.Count == 0)
+                {
+                    Console.WriteLine("Mem-pool is empty.");
+                    break;
+                }
+                Console.WriteLine($"Mem-pool ({blockChainService.PendingTransactions.Count} transactions):");
+                foreach (var tx in blockChainService.PendingTransactions)
+                    Console.WriteLine($"  {tx.From.Substring(0, Math.Min(16, tx.From.Length))}... -> {tx.To.Substring(0, Math.Min(16, tx.To.Length))}..., amount={tx.Amount}, fee={tx.Fee}");
+                break;
+
+            case "5":
+                if (isSpvMode) { Console.WriteLine("Invalid choice."); break; }
+
+                Console.Write("Enter sender address (publicKey): ");
+                var coldFrom = Console.ReadLine();
+
+                Console.Write("Enter token symbol (default MAIN): ");
+                var coldToken = Console.ReadLine()?.Trim();
+                if (string.IsNullOrWhiteSpace(coldToken))
+                    coldToken = "MAIN";
+
+                Console.Write("Enter receiver address: ");
+                var coldTo = Console.ReadLine();
+
+                Console.Write("Enter amount: ");
+                if (!decimal.TryParse(Console.ReadLine(), out decimal coldAmount))
+                {
+                    Console.WriteLine("Invalid amount.");
+                    break;
+                }
+
+                Console.Write("Enter fee (always paid in MAIN): ");
+                if (!decimal.TryParse(Console.ReadLine(), out decimal coldFee))
+                {
+                    Console.WriteLine("Invalid fee.");
+                    break;
+                }
+
+                Console.Write("Enter private key to sign: ");
+                var coldPrivateKey = ReadPassword();
+
+                Console.Write("Enter file path to save transaction (e.g. tx.json): ");
+                var coldFilePath = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(coldFilePath))
+                {
+                    Console.WriteLine("Invalid path.");
+                    break;
+                }
+
+                try
+                {
+                    var coldWalletService = provider.GetRequiredService<ColdWalletService>();
+                    coldWalletService.GenerateOfflineTransaction(coldFrom, coldTo, coldAmount, coldFee, coldToken, coldPrivateKey, coldFilePath);
+                    Console.WriteLine($"Offline transaction saved to file: {coldFilePath}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error creating offline transaction: {ex.Message}");
+                }
+                break;
+
+            case "6":
+                if (isSpvMode) { Console.WriteLine("Invalid choice."); break; }
+
+                Console.Write("Enter transaction file path (e.g. tx.json): ");
+                var broadcastFilePath = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(broadcastFilePath))
+                {
+                    Console.WriteLine("Invalid path.");
+                    break;
+                }
+
+                var (success, message) = blockChainService.BroadcastTransactionFromFile(broadcastFilePath);
+                Console.WriteLine(message);
+
+                if (success)
+                {
+                    var loadedTx = blockChainService.PendingTransactions.LastOrDefault();
+                    if (loadedTx != null)
+                    {
+                        await p2pClient.BroadcastTransactionAsync(loadedTx);
+                        Console.WriteLine($"Transaction {loadedTx.Id} broadcast to the network.");
+                    }
+                }
+                break;
+
+            case "x":
+                menuFlag = false;
+                break;
+
+            default:
+                Console.WriteLine("Invalid transactions choice.");
+                break;
+        }
+    }
+}
+
+void ShowMiningMenu()
+{
+    bool menuFlag = true;
+    while (menuFlag)
+    {
+        Console.WriteLine("\n=== Mining menu ===");
+        Console.WriteLine("1 - Mine block");
+        Console.WriteLine("2 - Total fees earned by my wallet");
+        Console.WriteLine("x - Back to main menu");
+        Console.Write("Pick option: ");
+
+        switch (Console.ReadLine()?.Trim().ToLowerInvariant())
+        {
+            case "1":
+                blockChainService.MineBlock(myWallet.PublicKey);
+                break;
+
+            case "2":
+                BlockChainExplorer? minerExplorer = null;
+                try
+                {
+                    minerExplorer = new BlockChainExplorer(blockChainService);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Could not open explorer: {ex.Message}");
+                    break;
+                }
+                Console.WriteLine($"Total fees earned by {myWallet.PublicKey[..Math.Min(16, myWallet.PublicKey.Length)]}...: {minerExplorer.GetTotalFeesEarned(myWallet.PublicKey)}");
+                break;
+
+            case "x":
+                menuFlag = false;
+                break;
+
+            default:
+                Console.WriteLine("Invalid mining choice.");
+                break;
+        }
+    }
+}
+
+async Task ShowBlockchainMenu()
+{
+    bool menuFlag = true;
+    while (menuFlag)
+    {
+        Console.WriteLine("\n=== Blockchain menu ===");
+        Console.WriteLine("1 - See block chain");
+        Console.WriteLine("2 - Explorer submenu");
+        Console.WriteLine("3 - Find transaction by ID");
+        Console.WriteLine("4 - Request SPV Merkle proof");
+        Console.WriteLine("5 - Run forensic audit test");
+        Console.WriteLine("6 - Run fork auditor simulation");
+        Console.WriteLine("7 - Simulate hacker attack");
+        Console.WriteLine("x - Back to main menu");
+        Console.Write("Pick option: ");
+
+        switch (Console.ReadLine()?.Trim().ToLowerInvariant())
+        {
+            case "1":
+                displayService.DisplayChain(blockChainService);
+                break;
+
+            case "2":
+                ShowExplorerMenu();
+                break;
+
+            case "3":
+                Console.Write("Enter transaction ID: ");
+                var txIdInput = Console.ReadLine();
+                if (!Guid.TryParse(txIdInput, out Guid txId))
+                {
+                    Console.WriteLine("Invalid ID format.");
+                    break;
+                }
+
+                var foundTx = blockChainService.Chain
+                    .SelectMany(b => b.Transactions)
+                    .FirstOrDefault(t => t.Id == txId);
+
+                if (foundTx != null)
+                {
+                    var blockIndex = blockChainService.Chain
+                        .First(b => b.Transactions.Any(t => t.Id == txId)).Index;
+                    Console.WriteLine("Transaction found in block:");
+                    Console.WriteLine($"  Block: #{blockIndex}");
+                    Console.WriteLine($"  From:  {foundTx.From}");
+                    Console.WriteLine($"  To:    {foundTx.To}");
+                    Console.WriteLine($"  Amount: {foundTx.Amount}");
+                    Console.WriteLine($"  Time:  {foundTx.Timestamp:yyyy-MM-dd HH:mm:ss}");
+                }
+                else
+                {
+                    var pendingTx = blockChainService.PendingTransactions
+                        .FirstOrDefault(t => t.Id == txId);
+                    if (pendingTx != null)
+                    {
+                        Console.WriteLine("Transaction is in the mempool (waiting for mining):");
+                        Console.WriteLine($"  From:   {pendingTx.From}");
+                        Console.WriteLine($"  To:     {pendingTx.To}");
+                        Console.WriteLine($"  Amount: {pendingTx.Amount}");
+                        Console.WriteLine($"  Time:   {pendingTx.Timestamp:yyyy-MM-dd HH:mm:ss}");
+                    }
+                    else
+                    {
+                        Console.WriteLine("Transaction not found.");
+                    }
+                }
+                break;
+
+            case "4":
                 Console.Write("Enter transaction ID to prove: ");
-                var spvTxInput = Console.ReadLine();
-                if (!Guid.TryParse(spvTxInput, out Guid spvTxId))
+                var pTxInput = Console.ReadLine();
+                if (!Guid.TryParse(pTxInput, out Guid pTxId))
                 {
                     Console.WriteLine("Invalid transaction ID format.");
                     break;
                 }
 
-                // Request proof from first node
-                Console.Write("Enter first node address (IP:Port) to request proof from: ");
-                var nodeA = Console.ReadLine();
-                if (string.IsNullOrWhiteSpace(nodeA) || !nodeA.Contains(':'))
+                var pBlock = blockChainService.Chain
+                    .FirstOrDefault(b => b.Transactions.Any(t => t.Id == pTxId));
+                Transaction pTx = null;
+                if (pBlock != null)
                 {
-                    Console.WriteLine("Invalid address format.");
-                    break;
-                }
-                var partsA = nodeA.Split(':');
-                var proof = await p2pClient.RequestProofAsync(partsA[0], int.Parse(partsA[1]), spvTxId);
-                if (proof == null)
-                {
-                    Console.WriteLine("Failed to get Merkle proof from node.");
-                    break;
-                }
-
-                // Cross-verify MerkleRoot with a second node
-                Console.Write("Enter SECOND node address (IP:Port) to cross-verify MerkleRoot: ");
-                var nodeB = Console.ReadLine();
-                if (string.IsNullOrWhiteSpace(nodeB) || !nodeB.Contains(':'))
-                {
-                    Console.WriteLine("Invalid address. Skipping cross-verification.");
+                    pTx = pBlock.Transactions.First(t => t.Id == pTxId);
                 }
                 else
                 {
-                    var partsB = nodeB.Split(':');
-                    var header = await p2pClient.RequestHeaderAsync(partsB[0], int.Parse(partsB[1]), proof.BlockIndex);
-                    if (header == null)
-                    {
-                        Console.WriteLine($"[SPV ШТОРМ] Не вдалося отримати заголовок блоку #{proof.BlockIndex} " +
-                                          $"від другої ноди {nodeB}! Доказ відхилено.");
-                        break;
-                    }
-
-                    // header[0] = Index, header[1] = MerkleRoot, header[2] = BlockHash
-                    string secondMerkleRoot = header[1];
-                    if (secondMerkleRoot != proof.MerkleRoot)
-                    {
-                        Console.ForegroundColor = ConsoleColor.Red;
-                        Console.WriteLine($"[SPV ШТОРМ] Повна нода {nodeA} намагалася підсунути фейковий корінь Меркла! Доказ відхилено.");
-                        Console.ResetColor();
-                        Console.WriteLine($"  MerkleRoot від {nodeA}: {proof.MerkleRoot[..16]}...");
-                        Console.WriteLine($"  MerkleRoot від {nodeB}: {secondMerkleRoot[..16]}...");
-                        break;
-                    }
-                    Console.WriteLine($"[SPV] Cross-verify passed — MerkleRoot confirmed by second node ✓");
+                    pTx = blockChainService.PendingTransactions
+                        .FirstOrDefault(t => t.Id == pTxId);
                 }
 
-                // ── Step 3: Look up transaction ──────────────────────
-                var localTx = spvTransactions.FirstOrDefault(t => t.Id == spvTxId);
-                if (localTx == null)
+                if (pTx == null)
                 {
-                    Console.WriteLine($"Transaction {spvTxId} not found locally. Proof received but cannot verify without tx data.");
-                    Console.WriteLine($"Proof says: block #{proof.BlockIndex}, MerkleRoot: {proof.MerkleRoot[..16]}...");
-                    Console.WriteLine($"Proof steps: {proof.Steps.Count}");
-                    foreach (var step in proof.Steps)
-                        Console.WriteLine($"  Sibling hash: {step.SiblingHash[..16]}... (side: {(step.IsLeft ? "LEFT" : "RIGHT")})");
+                    Console.WriteLine("Transaction not found locally.");
                     break;
                 }
 
-                // ── Step 4: Verify Merkle proof ──────────────────────
-                bool valid = HashingService.VerifyMerkleProof(proof, localTx);
-                Console.WriteLine(valid
-                    ? $"✅ PROOF VERIFIED: Transaction {spvTxId} is confirmed in block #{proof.BlockIndex}"
-                    : $"❌ PROOF INVALID: Cannot confirm transaction {spvTxId}");
-                break;
-            }
-
-            if (blockChainService.PendingTransactions.Count == 0)
-            {
-                Console.WriteLine("Mem-pool is empty.");
-                break;
-            }
-            Console.WriteLine($"Mem-pool ({blockChainService.PendingTransactions.Count} transactions):");
-            foreach (var tx in blockChainService.PendingTransactions)
-                Console.WriteLine($"  {tx.From.Substring(0, Math.Min(16, tx.From.Length))}... -> {tx.To.Substring(0, Math.Min(16, tx.To.Length))}..., amount={tx.Amount}, fee={tx.Fee}");
-            break;
-
-
-        case "4":
-            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
-            blockChainService.MineBlock(myWallet.PublicKey);
-            break;
-
-        case "5":
-            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
-            displayService.DisplayChain(blockChainService);
-            break;
-
-        case "6":
-            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
-            var balance = blockChainService.GetBalance(myWallet.PublicKey);
-            Console.WriteLine($"Your balance: {balance}");
-            break;
-
-        case "9":
-            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
-            Console.Write("Введіть ID транзакції: ");
-            var txIdInput = Console.ReadLine();
-            if (!Guid.TryParse(txIdInput, out Guid txId))
-            {
-                Console.WriteLine("Невірний формат ID.");
-                break;
-            }
-
-            var foundTx = blockChainService.Chain
-                .SelectMany(b => b.Transactions)
-                .FirstOrDefault(t => t.Id == txId);
-
-            if (foundTx != null)
-            {
-                var blockIndex = blockChainService.Chain
-                    .First(b => b.Transactions.Any(t => t.Id == txId)).Index;
-                Console.WriteLine("Транзакцію знайдено в блоці:");
-                Console.WriteLine($"  Блок: #{blockIndex}");
-                Console.WriteLine($"  Від:  {foundTx.From}");
-                Console.WriteLine($"  До:   {foundTx.To}");
-                Console.WriteLine($"  Сума: {foundTx.Amount}");
-                Console.WriteLine($"  Час:  {foundTx.Timestamp:yyyy-MM-dd HH:mm:ss}");
-            }
-            else
-            {
-                var pendingTx = blockChainService.PendingTransactions
-                    .FirstOrDefault(t => t.Id == txId);
-                if (pendingTx != null)
+                if (pBlock != null)
                 {
-                    Console.WriteLine("Транзакція знаходиться в мемпулі (очікує на майнінг):");
-                    Console.WriteLine($"  Від:  {pendingTx.From}");
-                    Console.WriteLine($"  До:   {pendingTx.To}");
-                    Console.WriteLine($"  Сума: {pendingTx.Amount}");
-                    Console.WriteLine($"  Час:  {pendingTx.Timestamp:yyyy-MM-dd HH:mm:ss}");
+                    var localProof = HashingService.BuildMerkleProof(pBlock, pTxId);
+                    if (localProof == null)
+                    {
+                        Console.WriteLine("Failed to build proof.");
+                        break;
+                    }
+                    bool verified = HashingService.VerifyMerkleProof(localProof, pTx);
+                    Console.WriteLine(verified
+                        ? $"✅ LOCAL PROOF: Transaction {pTxId} is in block #{pBlock.Index} (verified locally)"
+                        : $"❌ LOCAL PROOF FAILED: Transaction data does not match block");
+                    Console.WriteLine($"  MerkleRoot: {localProof.MerkleRoot[..16]}...");
+                    Console.WriteLine($"  Proof steps: {localProof.Steps.Count}");
+                    foreach (var step in localProof.Steps)
+                        Console.WriteLine($"    Sibling: {step.SiblingHash[..Math.Min(16, step.SiblingHash.Length)]}... ({(step.IsLeft ? "LEFT" : "RIGHT")})");
                 }
                 else
                 {
-                    Console.WriteLine("Транзакцію не знайдено.");
+                    Console.Write("Enter node address (IP:Port): ");
+                    var pAddr = Console.ReadLine();
+                    if (string.IsNullOrWhiteSpace(pAddr) || !pAddr.Contains(':'))
+                    {
+                        Console.WriteLine("Invalid address format.");
+                        break;
+                    }
+                    var pParts = pAddr.Split(':');
+                    var remoteProof = await p2pClient.RequestProofAsync(pParts[0], int.Parse(pParts[1]), pTxId);
+                    if (remoteProof == null)
+                    {
+                        Console.WriteLine("Failed to get Merkle proof from node.");
+                        break;
+                    }
+                    bool remoteValid = HashingService.VerifyMerkleProof(remoteProof, pTx);
+                    Console.WriteLine(remoteValid
+                        ? $"✅ REMOTE PROOF VERIFIED: Transaction {pTxId} confirmed in block #{remoteProof.BlockIndex}"
+                        : $"❌ REMOTE PROOF INVALID: Cannot confirm transaction {pTxId}");
+                    Console.WriteLine($"  Steps: {remoteProof.Steps.Count}");
                 }
-            }
-            break;
-
-        case "e":
-            Console.WriteLine("Exiting...");
-            flag = false;
-            break;
-
-        case "7":
-            Console.Write("Enter file path to save (e.g. chain.json): ");
-            var savePath = Console.ReadLine();
-            if (string.IsNullOrWhiteSpace(savePath))
-            {
-                Console.WriteLine("Invalid path.");
                 break;
-            }
-            try
-            {
-                blockChainService.SaveToFile(savePath);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error saving chain: {ex.Message}");
-            }
-            break;
 
-        case "8":
-            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
+            case "5":
+                Console.WriteLine("\n=================================================");
+                Console.WriteLine("  TASK 1 FINAL TEST — Forensic Audit Demo");
+                Console.WriteLine("=================================================");
 
-            Console.WriteLine("\n================================================");
-            Console.WriteLine("  SPV-ПЕРЕВІРКА ТРАНЗАКЦІЇ (Merkle Proof Demo)");
-            Console.WriteLine("================================================");
+                var testService = blockChainService.Clone();
+                var testKey = myWallet.PublicKey;
 
-            // Find a block with at least 2 transactions (coinbase + at least 1 user tx)
-            var spvTargetBlock = blockChainService.Chain
-                .FirstOrDefault(b => b.Transactions.Count >= 2);
-            if (spvTargetBlock == null)
-            {
-                Console.WriteLine("No block with enough transactions found.");
-                Console.WriteLine("Create a transaction and mine a block first.");
+                testService.MineBlock(testKey);
+                testService.MineBlock(testKey);
+                testService.MineBlock(testKey);
+                testService.MineBlock(testKey);
+                testService.MineBlock(testKey);
+                testService.MineBlock(testKey);
+
+                Console.WriteLine($"  Chain length: {testService.Chain.Count} blocks (genesis + 6)");
+                for (int i = 0; i < testService.Chain.Count; i++)
+                {
+                    var b = testService.Chain[i];
+                    Console.WriteLine($"  Block #{b.Index}  hash={b.Hash[..16]}...  txs={b.Transactions.Count}");
+                }
+
+                Console.WriteLine("\n[Phase 2] Tampering block #3 — inflating a COINBASE reward directly...");
+                var attackBlock = testService.Chain.FirstOrDefault(b => b.Index == 3);
+                if (attackBlock == null)
+                {
+                    Console.WriteLine("  ERROR: block #3 not found. Aborting.");
+                    break;
+                }
+
+                var victimTx = attackBlock.Transactions.FirstOrDefault(t => t.From == "COINBASE");
+                if (victimTx == null)
+                {
+                    Console.WriteLine("  ERROR: no COINBASE transaction in block #3. Aborting.");
+                    break;
+                }
+
+                decimal originalAmount = victimTx.Amount;
+                victimTx.Amount = 999_999m;
+                Console.WriteLine($"  Block #3 COINBASE tx: {originalAmount} → {victimTx.Amount}");
+                Console.WriteLine($"  Hash unchanged (attacker forgot to re-mine): {attackBlock.Hash[..16]}...");
+
+                Console.WriteLine("\n[Phase 3] Running RunFullAudit...");
+                var auditReport = blockChainService.RunFullAudit(testService.Chain);
+
+                Console.WriteLine($"  IsChainValid        : {auditReport.IsChainValid}");
+                Console.WriteLine($"  Compromised blocks  : [{string.Join(", ", auditReport.CompromisedBlockIndexes.Select(i => $"#{i}"))}]");
+                foreach (var kv in auditReport.ViolationDetails.OrderBy(x => x.Key))
+                    foreach (var v in kv.Value)
+                        Console.WriteLine($"    [Block #{kv.Key}] {v}");
+
+                Console.WriteLine("\n[Phase 4] Running FindAttackOrigin...");
+                var origin = blockChainService.FindAttackOrigin(auditReport, testService.Chain);
+                if (origin != null)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"  >>> Attack origin identified: Block #{origin.Index} <<<");
+                    Console.ResetColor();
+                    Console.WriteLine($"  Timestamp : {origin.Timestamp:yyyy-MM-dd HH:mm:ss}");
+                    Console.WriteLine($"  Hash      : {origin.Hash[..16]}...");
+                    Console.WriteLine($"  Txs       : {origin.Transactions.Count}");
+                    Console.WriteLine($"  Correct?  : {(origin.Index == 3 ? "✅ YES — block #3 correctly identified!" : "❌ NO — wrong block identified!")}");
+                }
+                else
+                {
+                    Console.WriteLine("  FindAttackOrigin returned null — no non-PrevHash violation found.");
+                }
+
+                Console.WriteLine("\n[Phase 5] Running GenerateForensicReport...");
+                var forensicText = blockChainService.GenerateForensicReport(auditReport, origin);
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine(forensicText);
+                Console.ResetColor();
+
+                bool testPassed = origin?.Index == 3 && !auditReport.IsChainValid;
+                Console.ForegroundColor = testPassed ? ConsoleColor.Green : ConsoleColor.Yellow;
+                Console.WriteLine(testPassed
+                    ? "=== TEST PASSED: system correctly detected and located the 51% attack ==="
+                    : "=== TEST FAILED: check the audit logic above ===");
+                Console.ResetColor();
                 break;
-            }
 
-            var targetBlock = spvTargetBlock;
-            var targetTx = targetBlock.Transactions.First(t => t.From != "COINBASE");
-            var targetTxHash = HashingService.ComputeHash(targetTx.ToRawString());
-            var expectedRoot = targetBlock.MerkleRoot;
+            case "6":
+                Console.WriteLine("\n=================================================");
+                Console.WriteLine("  FORK AUDITOR — Network split simulation");
+                Console.WriteLine("=================================================");
 
-            Console.WriteLine($"\nBlock #{targetBlock.Index}");
-            Console.WriteLine($"  Transactions in block: {targetBlock.Transactions.Count}");
-            Console.WriteLine($"  Target transaction ID: {targetTx.Id}");
-            Console.WriteLine($"  Target tx hash:        {targetTxHash[..24]}...");
-            Console.WriteLine($"  Expected MerkleRoot:   {expectedRoot[..24]}...");
+                Console.WriteLine("\n[Phase 1] Building shared history on both chains...");
+                blockChainService.MineBlock(myWallet.PublicKey);
 
-            // Generate proof using the homework method
-            var proofPath = HashingService.GetMerkleProof(
-                targetBlock.Transactions,
-                targetTx.Id.ToString());
+                Console.WriteLine($"Chain length:   {blockChainService.Chain.Count}");
+                Console.WriteLine($"Your balance:   {blockChainService.GetBalance(myWallet.PublicKey, "MAIN")}");
 
-            Console.WriteLine($"\nMerkle Proof Hash Path ({proofPath.Count} steps):");
-            for (int i = 0; i < proofPath.Count; i++)
-            {
-                string side = proofPath[i][0] == 'L' ? "LEFT" : "RIGHT";
-                string hash = proofPath[i].Substring(2);
-                Console.WriteLine($"  Step {i + 1}: [{side,5}] {hash[..24]}...");
-            }
+                Console.WriteLine("\n[Phase 2] Cloning chain — this is the fork moment...");
+                var fakeNode9 = blockChainService.Clone();
+                Console.WriteLine($"Fork point: both chains share {blockChainService.Chain.Count} blocks.");
+                Console.WriteLine($"Genesis match: {fakeNode9.Chain[0].Hash == blockChainService.Chain[0].Hash}");
 
-            // Verify using the homework method
-            bool spvResult = HashingService.VerifyMerkleProof(
-                targetTxHash,
-                proofPath,
-                expectedRoot);
+                Console.WriteLine("\n[Phase 3] User side: injecting real transactions into our fork...");
 
-            Console.ForegroundColor = spvResult ? ConsoleColor.Green : ConsoleColor.Red;
-            Console.WriteLine($"\n[SPV Verification Passed: {spvResult}] {(spvResult ? "✅" : "❌")}");
-            Console.ResetColor();
-            Console.WriteLine("  (Transaction IS in the block — proof is valid)");
-            break;
+                var aliceAddress = "Alice_ReceiverWallet";
+                var bobAddress = "Bob_ReceiverWallet";
 
-        case "0":
-            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
-            Console.WriteLine("\n=================================================");
-            Console.WriteLine("  FORK AUDITOR — Симуляція мережевого розколу");
-            Console.WriteLine("=================================================");
+                var tx9a = TransactionService.CreateTransaction(myWallet.PublicKey, aliceAddress, 20m, 2m);
+                TransactionService.SignTransaction(tx9a, myWallet.PrivateKey);
+                blockChainService.AddTransactionToMempool(tx9a);
 
-            // ── Phase 1: Build shared history ────────────────────────────────
-            Console.WriteLine("\n[Phase 1] Building shared history on both chains...");
-            blockChainService.MineBlock(myWallet.PublicKey); // ensure user has funds
+                var tx9b = TransactionService.CreateTransaction(myWallet.PublicKey, bobAddress, 15m, 2m);
+                TransactionService.SignTransaction(tx9b, myWallet.PrivateKey);
+                blockChainService.AddTransactionToMempool(tx9b);
 
-            Console.WriteLine($"Chain length:   {blockChainService.Chain.Count}");
-            Console.WriteLine($"Your balance:   {blockChainService.GetBalance(myWallet.PublicKey)}");
+                Console.WriteLine($"  tx1 → Alice: 20 coins  (id: {tx9a.Id})");
+                Console.WriteLine($"  tx2 → Bob:   15 coins  (id: {tx9b.Id})");
 
-            // ── Phase 2: Clone at fork point ─────────────────────────────────
-            // fakeNode and blockChainService now share IDENTICAL history
-            Console.WriteLine("\n[Phase 2] Cloning chain — this is the fork moment...");
-            var fakeNode9 = blockChainService.Clone();
-            Console.WriteLine($"Fork point: both chains share {blockChainService.Chain.Count} blocks.");
-            Console.WriteLine($"Genesis match: {fakeNode9.Chain[0].Hash == blockChainService.Chain[0].Hash}");
+                blockChainService.MineBlock(myWallet.PublicKey);
+                Console.WriteLine($"Block mined. Alice balance: {blockChainService.GetBalance(aliceAddress, "MAIN")}, " +
+                                  $"Bob balance: {blockChainService.GetBalance(bobAddress, "MAIN")}");
 
-            // ── Phase 3: User side — create real transactions, mine them ─────
-            // These transactions will end up ONLY in the user's fork.
-            // After the reorg they will be erased → triggers Task 3.
-            Console.WriteLine("\n[Phase 3] User side: injecting real transactions into our fork...");
+                blockChainService.MineBlock(myWallet.PublicKey);
+                Console.WriteLine($"User chain length: {blockChainService.Chain.Count}");
 
-            var aliceAddress = "Alice_ReceiverWallet";
-            var bobAddress = "Bob_ReceiverWallet";
+                Console.WriteLine("\n[Phase 4] Hacker side: mining competing chain without our transactions...");
+                var hackerAddr = "HackerWallet";
 
-            var tx9a = TransactionService.CreateTransaction(myWallet.PublicKey, aliceAddress, 20m, 2m);
-            TransactionService.SignTransaction(tx9a, myWallet.PrivateKey);
-            blockChainService.AddTransactionToMempool(tx9a);
-
-            var tx9b = TransactionService.CreateTransaction(myWallet.PublicKey, bobAddress, 15m, 2m);
-            TransactionService.SignTransaction(tx9b, myWallet.PrivateKey);
-            blockChainService.AddTransactionToMempool(tx9b);
-
-            Console.WriteLine($"  tx1 → Alice: 20 coins  (id: {tx9a.Id})");
-            Console.WriteLine($"  tx2 → Bob:   15 coins  (id: {tx9b.Id})");
-
-            // Mine a block that includes both transactions
-            blockChainService.MineBlock(myWallet.PublicKey);
-            Console.WriteLine($"Block mined. Alice balance: {blockChainService.GetBalance(aliceAddress)}, " +
-                              $"Bob balance: {blockChainService.GetBalance(bobAddress)}");
-
-            // Mine one more user block for a deeper reorg
-            blockChainService.MineBlock(myWallet.PublicKey);
-            Console.WriteLine($"User chain length: {blockChainService.Chain.Count}");
-
-            // ── Phase 4: Hacker side — mine more blocks, ignore our txs ──────
-            // fakeNode has NO knowledge of tx9a or tx9b — they live only in our fork.
-            Console.WriteLine("\n[Phase 4] Hacker side: mining competing chain without our transactions...");
-            var hackerAddr = "HackerWallet";
-
-            // Beat user chain in BOTH length and cumulative difficulty
-            while (fakeNode9.Chain.Count <= blockChainService.Chain.Count ||
-                   fakeNode9.Chain.Sum(b => b.DifficultyAtMining)
-                       <= blockChainService.Chain.Sum(b => b.DifficultyAtMining))
-            {
+                while (fakeNode9.Chain.Count <= blockChainService.Chain.Count ||
+                       fakeNode9.Chain.Sum(b => b.DifficultyAtMining)
+                           <= blockChainService.Chain.Sum(b => b.DifficultyAtMining))
+                {
+                    fakeNode9.MineBlock(hackerAddr);
+                }
                 fakeNode9.MineBlock(hackerAddr);
-            }
-            fakeNode9.MineBlock(hackerAddr); // one extra for good measure
 
-            Console.WriteLine($"Hacker chain length:      {fakeNode9.Chain.Count}  " +
-                              $"(diff: {fakeNode9.Chain.Sum(b => b.DifficultyAtMining):F2})");
-            Console.WriteLine($"Our chain length:         {blockChainService.Chain.Count}  " +
-                              $"(diff: {blockChainService.Chain.Sum(b => b.DifficultyAtMining):F2})");
+                Console.WriteLine($"Hacker chain length:      {fakeNode9.Chain.Count}  " +
+                                  $"(diff: {fakeNode9.Chain.Sum(b => b.DifficultyAtMining):F2})");
+                Console.WriteLine($"Our chain length:         {blockChainService.Chain.Count}  " +
+                                  $"(diff: {blockChainService.Chain.Sum(b => b.DifficultyAtMining):F2})");
 
-            // ── Snapshot balances for our own comparison printout ────────────
-            decimal snap_user = blockChainService.GetBalance(myWallet.PublicKey);
-            decimal snap_alice = blockChainService.GetBalance(aliceAddress);
-            decimal snap_bob = blockChainService.GetBalance(bobAddress);
+                decimal snap_user = blockChainService.GetBalance(myWallet.PublicKey, "MAIN");
+                decimal snap_alice = blockChainService.GetBalance(aliceAddress, "MAIN");
+                decimal snap_bob = blockChainService.GetBalance(bobAddress, "MAIN");
 
-            // ── Display chains before the swap ───────────────────────────────
-            Console.WriteLine("\n=================================================");
-            Console.WriteLine("  YOUR CHAIN — before ReplaceChain");
-            Console.WriteLine("=================================================");
-            displayService.DisplayChain(blockChainService);
+                Console.WriteLine("\n=================================================");
+                Console.WriteLine("  YOUR CHAIN — before ReplaceChain");
+                Console.WriteLine("=================================================");
+                displayService.DisplayChain(blockChainService);
 
-            Console.WriteLine("\n=================================================");
-            Console.WriteLine("  HACKER CHAIN — incoming from network");
-            Console.WriteLine("=================================================");
-            displayService.DisplayChain(fakeNode9);
+                Console.WriteLine("\n=================================================");
+                Console.WriteLine("  HACKER CHAIN — incoming from network");
+                Console.WriteLine("=================================================");
+                displayService.DisplayChain(fakeNode9);
 
-            // ── Phase 5: Trigger consensus — watch the auditor messages fire ─
-            Console.WriteLine("\n=================================================");
-            Console.WriteLine("  >>> CALLING ReplaceChain — auditor output below <<<");
-            Console.WriteLine("=================================================\n");
+                Console.WriteLine("\n=================================================");
+                Console.WriteLine("  >>> CALLING ReplaceChain — auditor output below <<<");
+                Console.WriteLine("=================================================\n");
 
-            blockChainService.ReplaceChain(fakeNode9.Chain);
+                blockChainService.ReplaceChain(fakeNode9.Chain);
 
-            // ── Display chain after the swap ─────────────────────────────────
-            Console.WriteLine("\n=================================================");
-            Console.WriteLine("  YOUR CHAIN — after ReplaceChain");
-            Console.WriteLine("=================================================");
-            displayService.DisplayChain(blockChainService);
+                Console.WriteLine("\n=================================================");
+                Console.WriteLine("  YOUR CHAIN — after ReplaceChain");
+                Console.WriteLine("=================================================");
+                displayService.DisplayChain(blockChainService);
 
-            // ── Summary ───────────────────────────────────────────────────────
-            bool swapped9 = blockChainService.Chain.Last().Author == hackerAddr;
-            if (swapped9)
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("\n✓ Reorg completed. Summary of damage:");
-                Console.ResetColor();
-
-                Console.WriteLine($"  Your wallet:  {snap_user}  → {blockChainService.GetBalance(myWallet.PublicKey)}");
-                Console.WriteLine($"  Alice:        {snap_alice} → {blockChainService.GetBalance(aliceAddress)}  (payment erased)");
-                Console.WriteLine($"  Bob:          {snap_bob}   → {blockChainService.GetBalance(bobAddress)}  (payment erased)");
-                Console.WriteLine($"  HackerWallet: {blockChainService.GetBalance(hackerAddr)} (rewarded for longer chain)");
-
-                Console.WriteLine("\n  Verify with UnoptimisedGetBalance (must match cached):");
-                Console.WriteLine($"  Your wallet (recomputed): {blockChainService.UnoptimisedGetBalance(myWallet.PublicKey)}");
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("\n✗ Chain was NOT replaced — hacker chain didn't beat ours.");
-                Console.ResetColor();
-            }
-            break;
-
-        case "s":
-            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
-            Console.WriteLine("Enter the address of the peer to request chain from (e.g., 127.0.0.1:5001):");
-            var chainNodeAddress = Console.ReadLine();
-            if (string.IsNullOrWhiteSpace(chainNodeAddress) || !chainNodeAddress.Contains(':'))
-            {
-                Console.WriteLine("Invalid address format. Please use IP:Port format.");
-                break;
-            }
-            var parts = chainNodeAddress.Split(':');
-            await p2pClient.RequestChainAsync(parts[0], int.Parse(parts[1]));
-            Console.WriteLine("Chain request sent.");
-            break;
-
-        case "a":
-            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
-            Console.WriteLine("HACKER ATTACK SIMULATION");
-            var lastBlock = blockChainService.Chain.Last();
-            var firstTx = lastBlock.Transactions.FirstOrDefault(t => t.From != "COINBASE");
-            firstTx.Amount = 1_000_000m; // inflate the amount to a huge value
-            lastBlock.Nonce = 0; // reset nonce to force re-mining
-
-            var miningService = provider.GetRequiredService<MiningService>();
-            var hashingService = provider.GetRequiredService<HashingService>();
-
-            // Re-mine the block with the modified transaction
-            MiningService.MineBlockMultiThreaded(lastBlock, blockChainService.Difficulty);
-
-            blockChainService.SaveToFile("chain.json");
-            break;
-
-        case "t":
-            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
-            Console.WriteLine("\n=================================================");
-            Console.WriteLine("  TASK 1 FINAL TEST — Forensic Audit Demo");
-            Console.WriteLine("=================================================");
-
-            // ── Phase 1: build a fresh isolated chain with 6 blocks ──────────
-            Console.WriteLine("\n[Phase 1] Mining 6 blocks on a local test chain...");
-            var testService = blockChainService.Clone(); // isolated copy, doesn't touch real chain
-            var testKey = myWallet.PublicKey;
-
-            // give the miner a real COINBASE balance first, then add user txs
-            testService.MineBlock(testKey); // block 1
-            testService.MineBlock(testKey); // block 2
-            testService.MineBlock(testKey); // block 3 ← attack target
-            testService.MineBlock(testKey); // block 4
-            testService.MineBlock(testKey); // block 5
-            testService.MineBlock(testKey); // block 6
-
-            Console.WriteLine($"  Chain length: {testService.Chain.Count} blocks (genesis + 6)");
-            for (int i = 0; i < testService.Chain.Count; i++)
-            {
-                var b = testService.Chain[i];
-                Console.WriteLine($"  Block #{b.Index}  hash={b.Hash[..16]}...  txs={b.Transactions.Count}");
-            }
-
-            // ── Phase 2: tamper block #3 directly (no re-mining) ─────────────
-            Console.WriteLine("\n[Phase 2] Tampering block #3 — inflating a COINBASE reward directly...");
-            var attackBlock = testService.Chain.FirstOrDefault(b => b.Index == 3);
-            if (attackBlock == null)
-            {
-                Console.WriteLine("  ERROR: block #3 not found. Aborting.");
-                break;
-            }
-
-            var victimTx = attackBlock.Transactions.FirstOrDefault(t => t.From == "COINBASE");
-            if (victimTx == null)
-            {
-                Console.WriteLine("  ERROR: no COINBASE transaction in block #3. Aborting.");
-                break;
-            }
-
-            decimal originalAmount = victimTx.Amount;
-            victimTx.Amount = 999_999m; // inflate without re-mining — MerkleRoot will mismatch
-            Console.WriteLine($"  Block #3 COINBASE tx: {originalAmount} → {victimTx.Amount}");
-            Console.WriteLine($"  Hash unchanged (attacker forgot to re-mine): {attackBlock.Hash[..16]}...");
-
-            // ── Phase 3: RunFullAudit ─────────────────────────────────────────
-            Console.WriteLine("\n[Phase 3] Running RunFullAudit...");
-            var auditReport = blockChainService.RunFullAudit(testService.Chain);
-
-            Console.WriteLine($"  IsChainValid        : {auditReport.IsChainValid}");
-            Console.WriteLine($"  Compromised blocks  : [{string.Join(", ", auditReport.CompromisedBlockIndexes.Select(i => $"#{i}"))}]");
-            foreach (var kv in auditReport.ViolationDetails.OrderBy(x => x.Key))
-                foreach (var v in kv.Value)
-                    Console.WriteLine($"    [Block #{kv.Key}] {v}");
-
-            // ── Phase 4: FindAttackOrigin ─────────────────────────────────────
-            Console.WriteLine("\n[Phase 4] Running FindAttackOrigin...");
-            var origin = blockChainService.FindAttackOrigin(auditReport, testService.Chain);
-            if (origin != null)
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"  >>> Attack origin identified: Block #{origin.Index} <<<");
-                Console.ResetColor();
-                Console.WriteLine($"  Timestamp : {origin.Timestamp:yyyy-MM-dd HH:mm:ss}");
-                Console.WriteLine($"  Hash      : {origin.Hash[..16]}...");
-                Console.WriteLine($"  Txs       : {origin.Transactions.Count}");
-                Console.WriteLine($"  Correct?  : {(origin.Index == 3 ? "✅ YES — block #3 correctly identified!" : "❌ NO — wrong block identified!")}");
-            }
-            else
-            {
-                Console.WriteLine("  FindAttackOrigin returned null — no non-PrevHash violation found.");
-            }
-
-            // ── Phase 5: GenerateForensicReport ──────────────────────────────
-            Console.WriteLine("\n[Phase 5] Running GenerateForensicReport...");
-            var forensicText = blockChainService.GenerateForensicReport(auditReport, origin);
-            Console.ForegroundColor = ConsoleColor.Cyan;
-            Console.WriteLine(forensicText);
-            Console.ResetColor();
-
-            // ── Summary ───────────────────────────────────────────────────────
-            bool testPassed = origin?.Index == 3 && !auditReport.IsChainValid;
-            Console.ForegroundColor = testPassed ? ConsoleColor.Green : ConsoleColor.Yellow;
-            Console.WriteLine(testPassed
-                ? "=== TEST PASSED: system correctly detected and located the 51% attack ==="
-                : "=== TEST FAILED: check the audit logic above ===");
-            Console.ResetColor();
-            break;
-
-        case "h":
-            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
-            bool hwFlag = true;
-            while (hwFlag)
-            {
-                Console.WriteLine("\nHomework menu:");
-                Console.WriteLine("1 - Стейт, TTL та Антиспам");
-                Console.WriteLine("2 - LockTime, Fee Priority & TTL Demo");
-                Console.WriteLine("9 - Back to main menu");
-                Console.Write("Pick HW: ");
-                switch (Console.ReadLine())
+                bool swapped9 = blockChainService.Chain.Last().Author == hackerAddr;
+                if (swapped9)
                 {
-                    case "1":
-                        Console.WriteLine("\nRunning HW3: State, TTL, Anti-Spam");
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("\n✓ Reorg completed. Summary of damage:");
+                    Console.ResetColor();
 
-                        // --- Scenario 1: ValidateAndRebuildState ---
-                        var svc1 = blockChainService.Clone();
-                        svc1.MineBlock(myWallet.PublicKey);
-                        svc1.MineBlock(myWallet.PublicKey);
+                    Console.WriteLine($"  Your wallet:  {snap_user}  → {blockChainService.GetBalance(myWallet.PublicKey, "MAIN")}");
+                    Console.WriteLine($"  Alice:        {snap_alice} → {blockChainService.GetBalance(aliceAddress, "MAIN")}  (payment erased)");
+                    Console.WriteLine($"  Bob:          {snap_bob}   → {blockChainService.GetBalance(bobAddress, "MAIN")}  (payment erased)");
+                    Console.WriteLine($"  HackerWallet: {blockChainService.GetBalance(hackerAddr, "MAIN")} (rewarded for longer chain)");
 
-                        var txRebuild = TransactionService.CreateTransaction(myWallet.PublicKey, "Alice", 10m, 1m);
-                        TransactionService.SignTransaction(txRebuild, myWallet.PrivateKey);
-                        svc1.AddTransactionToMempool(txRebuild);
-                        svc1.MineBlock(myWallet.PublicKey);
-
-                        Console.WriteLine($"Balance before failure: {svc1.GetBalance(myWallet.PublicKey)}");
-                        svc1.ImitateFailure();
-                        Console.WriteLine($"Balance after failure: {svc1.GetBalance(myWallet.PublicKey)}");
-
-                        bool rebuilt = svc1.ValidateAndRebuildState();
-                        Console.WriteLine($"ValidateAndRebuildState returned: {rebuilt}");
-                        Console.WriteLine($"Balance after rebuild: {svc1.GetBalance(myWallet.PublicKey)}");
-
-                        // --- Scenario 2: EvictStaleTransactions ---
-                        var svc2 = blockChainService.Clone();
-                        var oldTx1 = new Transaction("Sender1", "Receiver", 1m, 0.5m) { Timestamp = DateTime.UtcNow.AddSeconds(-120) };
-                        var oldTx2 = new Transaction("Sender2", "Receiver", 2m, 0.5m) { Timestamp = DateTime.UtcNow.AddSeconds(-120) };
-                        var recentTx = new Transaction("Sender3", "Receiver", 3m, 0.5m) { Timestamp = DateTime.UtcNow };
-
-                        svc2.PendingTransactions.Add(oldTx1);
-                        svc2.PendingTransactions.Add(oldTx2);
-                        svc2.PendingTransactions.Add(recentTx);
-
-                        Console.WriteLine($"Pending before eviction: {svc2.PendingTransactions.Count}");
-                        int evicted = svc2.EvictStaleTransactions(60);
-                        Console.WriteLine($"Evicted {evicted} stale transactions");
-                        Console.WriteLine($"Pending after eviction: {svc2.PendingTransactions.Count}");
-
-                        // --- Scenario 3: Anti-Spam ---
-                        var svc3 = blockChainService.Clone();
-                        svc3.MineBlock(myWallet.PublicKey);
-
-                        string victim = "SpamVictim";
-                        int added = 0;
-                        for (int i = 0; i < 4; i++)
-                        {
-                            var spamTx = TransactionService.CreateTransaction(myWallet.PublicKey, victim, 1m, 1.0m);
-                            TransactionService.SignTransaction(spamTx, myWallet.PrivateKey);
-                            try
-                            {
-                                svc3.AddTransactionToMempool(spamTx);
-                                added++;
-                                Console.WriteLine($"Tx {i+1} added to mempool");
-                            }
-                            catch (InvalidOperationException ex)
-                            {
-                                Console.WriteLine($"Tx {i+1} rejected: {ex.Message}");
-                            }
-                        }
-                        Console.WriteLine($"Total added: {added}, final pending count: {svc3.PendingTransactions.Count}");
-                        break;
-
-                    case "2":
-                        Console.WriteLine("\nRunning HW: LockTime, Fee Priority & TTL Demo");
-
-                        var svc = blockChainService.Clone();
-                        // svc has 1 block (genesis) after Clone — mine a few blocks to give the wallet balance
-                        svc.MineBlock(myWallet.PublicKey);
-                        svc.MineBlock(myWallet.PublicKey);
-
-                        // --- Demo 1: Fee Priority (VIP Queue) ---
-                        Console.WriteLine("\n--- Demo 1: Fee Priority ---");
-                        var txLowFee = TransactionService.CreateTransaction(myWallet.PublicKey, "LowFeeReceiver", 5m, 1.0m);
-                        var txHighFee = TransactionService.CreateTransaction(myWallet.PublicKey, "HighFeeReceiver", 5m, 5.0m);
-                        TransactionService.SignTransaction(txLowFee, myWallet.PrivateKey);
-                        TransactionService.SignTransaction(txHighFee, myWallet.PrivateKey);
-                        svc.AddTransactionToMempool(txLowFee);
-                        svc.AddTransactionToMempool(txHighFee);
-
-                        Console.WriteLine("Mempool before mining:");
-                        foreach (var tx in svc.PendingTransactions.OrderByDescending(t => t.Fee))
-                            Console.WriteLine($"  {tx.From.Substring(0, Math.Min(16, tx.From.Length))}... -> {tx.To.Substring(0, Math.Min(16, tx.To.Length))}...  Fee={tx.Fee}  Amount={tx.Amount}");
-
-                        svc.MineBlock(myWallet.PublicKey);
-                        var minedBlock = svc.Chain.Last();
-                        Console.WriteLine($"\nMined block #{minedBlock.Index} with {minedBlock.Transactions.Count - 1} user txs.");
-                        Console.WriteLine("Transactions in block (excluding coinbase):");
-                        foreach (var tx in minedBlock.Transactions.Where(t => t.From != "COINBASE"))
-                            Console.WriteLine($"  {tx.From.Substring(0, Math.Min(16, tx.From.Length))}... -> {tx.To.Substring(0, Math.Min(16, tx.To.Length))}...  Fee={tx.Fee}  Amount={tx.Amount}");
-                        Console.WriteLine($"Remaining mempool: {svc.PendingTransactions.Count} txs");
-
-                        // --- Demo 2: TTL Eviction ---
-                        Console.WriteLine("\n--- Demo 2: TTL Eviction ---");
-                        var freshTx = TransactionService.CreateTransaction(myWallet.PublicKey, "FreshReceiver", 2m, 1.0m);
-                        TransactionService.SignTransaction(freshTx, myWallet.PrivateKey);
-                        svc.AddTransactionToMempool(freshTx);
-                        Console.WriteLine($"Added fresh tx. Mempool count: {svc.PendingTransactions.Count}");
-
-                        var staleTx = new Transaction("StaleSender", "StaleReceiver", 3m, 1.0m)
-                        {
-                            Timestamp = DateTime.UtcNow.AddSeconds(-600) // 10 minutes old, exceeds 300s TTL
-                        };
-                        svc.PendingTransactions.Add(staleTx);
-                        Console.WriteLine($"Injected stale tx (10 min old). Mempool count: {svc.PendingTransactions.Count}");
-
-                        var triggerTx = TransactionService.CreateTransaction(myWallet.PublicKey, "Trigger", 1m, 1.0m);
-                        TransactionService.SignTransaction(triggerTx, myWallet.PrivateKey);
-                        svc.AddTransactionToMempool(triggerTx); // triggers eviction
-                        Console.WriteLine($"After TTL eviction on add. Mempool count: {svc.PendingTransactions.Count}");
-                        Console.WriteLine($"Stale tx still in mempool? {svc.PendingTransactions.Any(t => t.From == "StaleSender")}");
-
-                        // --- Demo 3: LockTime (nLockTime) ---
-                        Console.WriteLine("\n--- Demo 3: LockTime (nLockTime) ---");
-                        int lockHeight = svc.Chain.Count + 4; // lock for 4 more blocks
-                        var lockTx = TransactionService.CreateTransaction(myWallet.PublicKey, "LockReceiver", 7m, 1.0m);
-                        lockTx.LockTime = lockHeight;
-                        TransactionService.SignTransaction(lockTx, myWallet.PrivateKey);
-                        svc.AddTransactionToMempool(lockTx);
-                        Console.WriteLine($"Added tx with LockTime={lockTx.LockTime}. Current chain height: {svc.Chain.Count}.");
-
-                        for (int i = 1; i <= 5; i++)
-                        {
-                            svc.MineBlock(myWallet.PublicKey);
-                            Console.WriteLine($"  Mined block #{svc.Chain.Last().Index}. Mempool: {svc.PendingTransactions.Count} tx(s). " +
-                                              $"LockTx still waiting? {svc.PendingTransactions.Contains(lockTx)}");
-                        }
-                        break;
-
-                    case "9":
-                        hwFlag = false;
-                        break;
-
-                    default:
-                        Console.WriteLine("Invalid choice.");
-                        break;
+                    Console.WriteLine("\n  Verify with UnoptimisedGetBalance (must match cached):");
+                    Console.WriteLine($"  Your wallet (recomputed): {blockChainService.UnoptimisedGetBalance(myWallet.PublicKey, "MAIN")}");
                 }
-            }
-            break;
-
-        case "l":
-            if (isSpvMode) { Console.WriteLine("Blocked in SPV mode."); break; }
-            Console.Write("Enter file path to load (e.g. chain.json): ");
-            var loadPath = Console.ReadLine();
-            if (string.IsNullOrWhiteSpace(loadPath))
-            {
-                Console.WriteLine("Invalid path.");
-                break;
-            }
-            try
-            {
-                blockChainService.LoadFromFile(loadPath);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error loading chain: {ex.Message}");
-            }
-            break;
-
-        case "p":
-            // Full Node SPV proof request
-            Console.Write("Enter transaction ID to prove: ");
-            var pTxInput = Console.ReadLine();
-            if (!Guid.TryParse(pTxInput, out Guid pTxId))
-            {
-                Console.WriteLine("Invalid transaction ID format.");
-                break;
-            }
-
-            // Try to find the transaction in the chain
-            var pBlock = blockChainService.Chain
-                .FirstOrDefault(b => b.Transactions.Any(t => t.Id == pTxId));
-            Transaction pTx = null;
-            if (pBlock != null)
-            {
-                pTx = pBlock.Transactions.First(t => t.Id == pTxId);
-            }
-            else
-            {
-                pTx = blockChainService.PendingTransactions
-                    .FirstOrDefault(t => t.Id == pTxId);
-            }
-
-            if (pTx == null)
-            {
-                Console.WriteLine("Transaction not found locally.");
-                break;
-            }
-
-            if (pBlock != null)
-            {
-                // Transaction already in a block — build proof locally and verify
-                var localProof = HashingService.BuildMerkleProof(pBlock, pTxId);
-                if (localProof == null)
+                else
                 {
-                    Console.WriteLine("Failed to build proof.");
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("\n✗ Chain was NOT replaced — hacker chain didn't beat ours.");
+                    Console.ResetColor();
+                }
+                break;
+
+            case "7":
+                Console.WriteLine("HACKER ATTACK SIMULATION");
+                var lastBlock = blockChainService.Chain.Last();
+                var firstTx = lastBlock.Transactions.FirstOrDefault(t => t.From != "COINBASE");
+                if (firstTx == null)
+                {
+                    Console.WriteLine("No user transaction found in the last block to tamper with.");
                     break;
                 }
-                bool verified = HashingService.VerifyMerkleProof(localProof, pTx);
-                Console.WriteLine(verified
-                    ? $"✅ LOCAL PROOF: Transaction {pTxId} is in block #{pBlock.Index} (verified locally)"
-                    : $"❌ LOCAL PROOF FAILED: Transaction data does not match block");
-                Console.WriteLine($"  MerkleRoot: {localProof.MerkleRoot[..16]}...");
-                Console.WriteLine($"  Proof steps: {localProof.Steps.Count}");
-                foreach (var step in localProof.Steps)
-                    Console.WriteLine($"    Sibling: {step.SiblingHash[..Math.Min(16, step.SiblingHash.Length)]}... ({(step.IsLeft ? "LEFT" : "RIGHT")})");
-            }
-            else
-            {
-                // Transaction is in mempool — request proof from a peer
-                Console.Write("Enter node address (IP:Port): ");
-                var pAddr = Console.ReadLine();
-                if (string.IsNullOrWhiteSpace(pAddr) || !pAddr.Contains(':'))
+                firstTx.Amount = 1_000_000m;
+                lastBlock.Nonce = 0;
+
+                var miningService = provider.GetRequiredService<MiningService>();
+                var hashingService = provider.GetRequiredService<HashingService>();
+
+                MiningService.MineBlockMultiThreaded(lastBlock, blockChainService.Difficulty);
+
+                blockChainService.SaveToFile("chain.json");
+                break;
+
+            case "x":
+                menuFlag = false;
+                break;
+
+            default:
+                Console.WriteLine("Invalid blockchain choice.");
+                break;
+        }
+    }
+}
+
+void ShowExplorerMenu()
+{
+    BlockChainExplorer? explorer = null;
+    try
+    {
+        explorer = new BlockChainExplorer(blockChainService);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Could not open explorer: {ex.Message}");
+        return;
+    }
+
+    bool exploreFlag = true;
+    while (exploreFlag)
+    {
+        Console.WriteLine("\n=== Explorer menu ===");
+        Console.WriteLine("1 - Total transaction volume");
+        Console.WriteLine("2 - Largest transaction");
+        Console.WriteLine("3 - Address history");
+        Console.WriteLine("4 - Total burned fees");
+        Console.WriteLine("5 - Actual total supply");
+        Console.WriteLine("6 - Find transaction location");
+        Console.WriteLine("7 - Find transaction by ID");
+        Console.WriteLine("8 - Find block by transaction ID");
+        Console.WriteLine("9 - Wallet transaction history");
+        Console.WriteLine("0 - Total fees earned by miner");
+        Console.WriteLine("x - Back to Blockchain menu");
+        Console.Write("Pick explorer option: ");
+
+        switch (Console.ReadLine()?.Trim().ToLowerInvariant())
+        {
+            case "1":
+                Console.WriteLine($"Total transaction volume: {explorer.GetTotalTransactionVolume()}");
+                break;
+
+            case "2":
+                var largest = explorer.GetLargestTransaction();
+                if (largest == null)
                 {
-                    Console.WriteLine("Invalid address format.");
+                    Console.WriteLine("No transactions found.");
+                }
+                else
+                {
+                    Console.WriteLine($"Largest transaction: ID={largest.Id}, Amount={largest.Amount}, Token={largest.TokenSymbol}, From={largest.From[..Math.Min(16, largest.From.Length)]}..., To={largest.To[..Math.Min(16, largest.To.Length)]}...");
+                }
+                break;
+
+            case "3":
+                Console.Write("Enter address: ");
+                var addr = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(addr))
+                {
+                    Console.WriteLine("Invalid address.");
                     break;
                 }
-                var pParts = pAddr.Split(':');
-                var remoteProof = await p2pClient.RequestProofAsync(pParts[0], int.Parse(pParts[1]), pTxId);
-                if (remoteProof == null)
+                var history = explorer.GetAddressHistory(addr);
+                Console.WriteLine($"Address history ({history.Count} transactions):");
+                foreach (var histTx in history)
                 {
-                    Console.WriteLine("Failed to get Merkle proof from node.");
+                    Console.WriteLine($"  {histTx.Id} | {histTx.From[..Math.Min(16, histTx.From.Length)]}... -> {histTx.To[..Math.Min(16, histTx.To.Length)]}... | {histTx.Amount} {histTx.TokenSymbol}");
+                }
+                break;
+
+            case "4":
+                Console.WriteLine($"Total burned fees: {explorer.GetTotalBurnedFees()}");
+                break;
+
+            case "5":
+                Console.WriteLine($"Actual total supply: {explorer.GetActualTotalSupply()}");
+                break;
+
+            case "6":
+                Console.Write("Enter transaction ID: ");
+                if (!Guid.TryParse(Console.ReadLine(), out Guid locId))
+                {
+                    Console.WriteLine("Invalid ID format.");
                     break;
                 }
-                bool remoteValid = HashingService.VerifyMerkleProof(remoteProof, pTx);
-                Console.WriteLine(remoteValid
-                    ? $"✅ REMOTE PROOF VERIFIED: Transaction {pTxId} confirmed in block #{remoteProof.BlockIndex}"
-                    : $"❌ REMOTE PROOF INVALID: Cannot confirm transaction {pTxId}");
-                Console.WriteLine($"  Steps: {remoteProof.Steps.Count}");
-            }
-            break;
+                var (foundBlock, locatedTx) = explorer.FindTransactionLocation(locId);
+                if (locatedTx == null)
+                {
+                    Console.WriteLine("Transaction not found.");
+                }
+                else
+                {
+                    Console.WriteLine($"Transaction found: ID={locatedTx.Id}, Amount={locatedTx.Amount} {locatedTx.TokenSymbol}");
+                    if (foundBlock != null)
+                    {
+                        Console.WriteLine($"  Block #{foundBlock.Index}, Hash={foundBlock.Hash[..Math.Min(16, foundBlock.Hash.Length)]}...");
+                    }
+                    else
+                    {
+                        Console.WriteLine("  Block information not available.");
+                    }
+                }
+                break;
 
-        case "f":
-            P2PServer.FakeMerkleMode = !P2PServer.FakeMerkleMode;
-            Console.ForegroundColor = P2PServer.FakeMerkleMode ? ConsoleColor.Red : ConsoleColor.Green;
-            Console.WriteLine(P2PServer.FakeMerkleMode
-                ? "⚠ FAKE MERKLE MODE ENABLED — node will send random MerkleRoots to SPV clients"
-                : "✅ Fake Merkle mode disabled — node is honest again");
-            Console.ResetColor();
-            break;
+            case "7":
+                Console.Write("Enter transaction ID: ");
+                var findId = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(findId))
+                {
+                    Console.WriteLine("Invalid ID.");
+                    break;
+                }
+                var foundById = explorer.FindTransactionById(findId);
+                if (foundById == null)
+                {
+                    Console.WriteLine("Transaction not found.");
+                }
+                else
+                {
+                    Console.WriteLine($"Found: ID={foundById.Id}, Amount={foundById.Amount} {foundById.TokenSymbol}, From={foundById.From[..Math.Min(16, foundById.From.Length)]}..., To={foundById.To[..Math.Min(16, foundById.To.Length)]}...");
+                }
+                break;
 
-        default:
-            Console.WriteLine("Invalid choice. Please try again.");
-            break;
+            case "8":
+                Console.Write("Enter transaction ID: ");
+                var blockTxId = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(blockTxId))
+                {
+                    Console.WriteLine("Invalid ID.");
+                    break;
+                }
+                var blockByTx = explorer.FindBlockByTransactionId(blockTxId);
+                if (blockByTx == null)
+                {
+                    Console.WriteLine("Block not found for this transaction ID.");
+                }
+                else
+                {
+                    Console.WriteLine($"Block #{blockByTx.Index}, Hash={blockByTx.Hash[..Math.Min(16, blockByTx.Hash.Length)]}..., Txs={blockByTx.Transactions.Count}");
+                }
+                break;
+
+            case "9":
+                var walletHistory = explorer.GetTransactionHistory(myWallet.PublicKey);
+                if (walletHistory.Count == 0)
+                {
+                    Console.WriteLine("No wallet history found.");
+                }
+                else
+                {
+                    Console.WriteLine($"Wallet history ({walletHistory.Count} transactions):");
+                    foreach (var walletTx in walletHistory)
+                    {
+                        Console.WriteLine($"  {walletTx.Timestamp:yyyy-MM-dd HH:mm:ss} | {walletTx.Id} | {walletTx.From[..Math.Min(16, walletTx.From.Length)]}... -> {walletTx.To[..Math.Min(16, walletTx.To.Length)]}... | {walletTx.Amount} {walletTx.TokenSymbol}");
+                    }
+                }
+                break;
+
+            case "0":
+                Console.Write("Enter miner address: ");
+                var minerAddr = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(minerAddr))
+                {
+                    Console.WriteLine("Invalid address.");
+                    break;
+                }
+                Console.WriteLine($"Total fees earned by {minerAddr[..Math.Min(16, minerAddr.Length)]}...: {explorer.GetTotalFeesEarned(minerAddr)}");
+                break;
+
+            case "x":
+                exploreFlag = false;
+                break;
+
+            default:
+                Console.WriteLine("Invalid explorer choice.");
+                break;
+        }
+    }
+}
+
+void ShowDemosMenu()
+{
+    bool menuFlag = true;
+    while (menuFlag)
+    {
+        Console.WriteLine("\n=== Demos & Tests menu ===");
+        Console.WriteLine("1 - SPV transaction verification (Merkle Proof demo)");
+        Console.WriteLine("2 - Toggle Fake Merkle mode");
+        Console.WriteLine("3 - Homework tests");
+        Console.WriteLine("x - Back to main menu");
+        Console.Write("Pick option: ");
+
+        switch (Console.ReadLine()?.Trim().ToLowerInvariant())
+        {
+            case "1":
+                Console.WriteLine("\n================================================");
+                Console.WriteLine("  SPV TRANSACTION VERIFICATION (Merkle Proof Demo)");
+                Console.WriteLine("================================================");
+
+                var spvTargetBlock = blockChainService.Chain
+                    .FirstOrDefault(b => b.Transactions.Count >= 2);
+                if (spvTargetBlock == null)
+                {
+                    Console.WriteLine("No block with enough transactions found.");
+                    Console.WriteLine("Create a transaction and mine a block first.");
+                    break;
+                }
+
+                var targetBlock = spvTargetBlock;
+                var targetTx = targetBlock.Transactions.First(t => t.From != "COINBASE");
+                var targetTxHash = HashingService.ComputeHash(targetTx.ToRawString());
+                var expectedRoot = targetBlock.MerkleRoot;
+
+                Console.WriteLine($"\nBlock #{targetBlock.Index}");
+                Console.WriteLine($"  Transactions in block: {targetBlock.Transactions.Count}");
+                Console.WriteLine($"  Target transaction ID: {targetTx.Id}");
+                Console.WriteLine($"  Target tx hash:        {targetTxHash[..24]}...");
+                Console.WriteLine($"  Expected MerkleRoot:   {expectedRoot[..24]}...");
+
+                var proofPath = HashingService.GetMerkleProof(
+                    targetBlock.Transactions,
+                    targetTx.Id.ToString());
+
+                Console.WriteLine($"\nMerkle Proof Hash Path ({proofPath.Count} steps):");
+                for (int i = 0; i < proofPath.Count; i++)
+                {
+                    string side = proofPath[i][0] == 'L' ? "LEFT" : "RIGHT";
+                    string hash = proofPath[i].Substring(2);
+                    Console.WriteLine($"  Step {i + 1}: [{side,5}] {hash[..24]}...");
+                }
+
+                bool spvResult = HashingService.VerifyMerkleProof(
+                    targetTxHash,
+                    proofPath,
+                    expectedRoot);
+
+                Console.ForegroundColor = spvResult ? ConsoleColor.Green : ConsoleColor.Red;
+                Console.WriteLine($"\n[SPV Verification Passed: {spvResult}] {(spvResult ? "✅" : "❌")}");
+                Console.ResetColor();
+                Console.WriteLine("  (Transaction IS in the block — proof is valid)");
+                break;
+
+            case "2":
+                P2PServer.FakeMerkleMode = !P2PServer.FakeMerkleMode;
+                Console.ForegroundColor = P2PServer.FakeMerkleMode ? ConsoleColor.Red : ConsoleColor.Green;
+                Console.WriteLine(P2PServer.FakeMerkleMode
+                    ? "⚠ FAKE MERKLE MODE ENABLED — node will send random MerkleRoots to SPV clients"
+                    : "✅ Fake Merkle mode disabled — node is honest again");
+                Console.ResetColor();
+                break;
+
+            case "3":
+                ShowHomeworkMenu();
+                break;
+
+            case "x":
+                menuFlag = false;
+                break;
+
+            default:
+                Console.WriteLine("Invalid demos choice.");
+                break;
+        }
+    }
+}
+
+void ShowHomeworkMenu()
+{
+    bool hwFlag = true;
+    while (hwFlag)
+    {
+        Console.WriteLine("\n=== Homework menu ===");
+        Console.WriteLine("1 - State, TTL and Anti-Spam");
+        Console.WriteLine("2 - LockTime, Fee Priority & TTL Demo");
+        Console.WriteLine("x - Back to Demos & Tests menu");
+        Console.Write("Pick HW: ");
+        switch (Console.ReadLine()?.Trim().ToLowerInvariant())
+        {
+            case "1":
+                Console.WriteLine("\nRunning HW3: State, TTL, Anti-Spam");
+
+                var svc1 = blockChainService.Clone();
+                svc1.MineBlock(myWallet.PublicKey);
+                svc1.MineBlock(myWallet.PublicKey);
+
+                var txRebuild = TransactionService.CreateTransaction(myWallet.PublicKey, "Alice", 10m, 1m);
+                TransactionService.SignTransaction(txRebuild, myWallet.PrivateKey);
+                svc1.AddTransactionToMempool(txRebuild);
+                svc1.MineBlock(myWallet.PublicKey);
+
+                Console.WriteLine($"Balance before failure: {svc1.GetBalance(myWallet.PublicKey, "MAIN")}");
+                svc1.ImitateFailure();
+                Console.WriteLine($"Balance after failure: {svc1.GetBalance(myWallet.PublicKey, "MAIN")}");
+
+                bool rebuilt = svc1.ValidateAndRebuildState();
+                Console.WriteLine($"ValidateAndRebuildState returned: {rebuilt}");
+                Console.WriteLine($"Balance after rebuild: {svc1.GetBalance(myWallet.PublicKey, "MAIN")}");
+
+                var svc2 = blockChainService.Clone();
+                var oldTx1 = new Transaction("Sender1", "Receiver", 1m, 0.5m) { Timestamp = DateTime.UtcNow.AddSeconds(-120) };
+                var oldTx2 = new Transaction("Sender2", "Receiver", 2m, 0.5m) { Timestamp = DateTime.UtcNow.AddSeconds(-120) };
+                var recentTx = new Transaction("Sender3", "Receiver", 3m, 0.5m) { Timestamp = DateTime.UtcNow };
+
+                svc2.PendingTransactions.Add(oldTx1);
+                svc2.PendingTransactions.Add(oldTx2);
+                svc2.PendingTransactions.Add(recentTx);
+
+                Console.WriteLine($"Pending before eviction: {svc2.PendingTransactions.Count}");
+                int evicted = svc2.EvictStaleTransactions(60);
+                Console.WriteLine($"Evicted {evicted} stale transactions");
+                Console.WriteLine($"Pending after eviction: {svc2.PendingTransactions.Count}");
+
+                var svc3 = blockChainService.Clone();
+                svc3.MineBlock(myWallet.PublicKey);
+
+                string victim = "SpamVictim";
+                int added = 0;
+                for (int i = 0; i < 4; i++)
+                {
+                    var spamTx = TransactionService.CreateTransaction(myWallet.PublicKey, victim, 1m, 1.0m);
+                    TransactionService.SignTransaction(spamTx, myWallet.PrivateKey);
+                    try
+                    {
+                        svc3.AddTransactionToMempool(spamTx);
+                        added++;
+                        Console.WriteLine($"Tx {i+1} added to mempool");
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        Console.WriteLine($"Tx {i+1} rejected: {ex.Message}");
+                    }
+                }
+                Console.WriteLine($"Total added: {added}, final pending count: {svc3.PendingTransactions.Count}");
+                break;
+
+            case "2":
+                Console.WriteLine("\nRunning HW: LockTime, Fee Priority & TTL Demo");
+
+                var svc = blockChainService.Clone();
+                svc.MineBlock(myWallet.PublicKey);
+                svc.MineBlock(myWallet.PublicKey);
+
+                Console.WriteLine("\n--- Demo 1: Fee Priority ---");
+                var txLowFee = TransactionService.CreateTransaction(myWallet.PublicKey, "LowFeeReceiver", 5m, 1.0m);
+                var txHighFee = TransactionService.CreateTransaction(myWallet.PublicKey, "HighFeeReceiver", 5m, 5.0m);
+                TransactionService.SignTransaction(txLowFee, myWallet.PrivateKey);
+                TransactionService.SignTransaction(txHighFee, myWallet.PrivateKey);
+                svc.AddTransactionToMempool(txLowFee);
+                svc.AddTransactionToMempool(txHighFee);
+
+                Console.WriteLine("Mempool before mining:");
+                foreach (var tx in svc.PendingTransactions.OrderByDescending(t => t.Fee))
+                    Console.WriteLine($"  {tx.From.Substring(0, Math.Min(16, tx.From.Length))}... -> {tx.To.Substring(0, Math.Min(16, tx.To.Length))}...  Fee={tx.Fee}  Amount={tx.Amount}");
+
+                svc.MineBlock(myWallet.PublicKey);
+                var minedBlock = svc.Chain.Last();
+                Console.WriteLine($"\nMined block #{minedBlock.Index} with {minedBlock.Transactions.Count - 1} user txs.");
+                Console.WriteLine("Transactions in block (excluding coinbase):");
+                foreach (var tx in minedBlock.Transactions.Where(t => t.From != "COINBASE"))
+                    Console.WriteLine($"  {tx.From.Substring(0, Math.Min(16, tx.From.Length))}... -> {tx.To.Substring(0, Math.Min(16, tx.To.Length))}...  Fee={tx.Fee}  Amount={tx.Amount}");
+                Console.WriteLine($"Remaining mempool: {svc.PendingTransactions.Count} txs");
+
+                Console.WriteLine("\n--- Demo 2: TTL Eviction ---");
+                var freshTx = TransactionService.CreateTransaction(myWallet.PublicKey, "FreshReceiver", 2m, 1.0m);
+                TransactionService.SignTransaction(freshTx, myWallet.PrivateKey);
+                svc.AddTransactionToMempool(freshTx);
+                Console.WriteLine($"Added fresh tx. Mempool count: {svc.PendingTransactions.Count}");
+
+                var staleTx = new Transaction("StaleSender", "StaleReceiver", 3m, 1.0m)
+                {
+                    Timestamp = DateTime.UtcNow.AddSeconds(-600)
+                };
+                svc.PendingTransactions.Add(staleTx);
+                Console.WriteLine($"Injected stale tx (10 min old). Mempool count: {svc.PendingTransactions.Count}");
+
+                var triggerTx = TransactionService.CreateTransaction(myWallet.PublicKey, "Trigger", 1m, 1.0m);
+                TransactionService.SignTransaction(triggerTx, myWallet.PrivateKey);
+                svc.AddTransactionToMempool(triggerTx);
+                Console.WriteLine($"After TTL eviction on add. Mempool count: {svc.PendingTransactions.Count}");
+                Console.WriteLine($"Stale tx still in mempool? {svc.PendingTransactions.Any(t => t.From == "StaleSender")}");
+
+                Console.WriteLine("\n--- Demo 3: LockTime (nLockTime) ---");
+                int lockHeight = svc.Chain.Count + 4;
+                var lockTx = TransactionService.CreateTransaction(myWallet.PublicKey, "LockReceiver", 7m, 1.0m);
+                lockTx.LockTime = lockHeight;
+                TransactionService.SignTransaction(lockTx, myWallet.PrivateKey);
+                svc.AddTransactionToMempool(lockTx);
+                Console.WriteLine($"Added tx with LockTime={lockTx.LockTime}. Current chain height: {svc.Chain.Count}.");
+
+                for (int i = 1; i <= 5; i++)
+                {
+                    svc.MineBlock(myWallet.PublicKey);
+                    Console.WriteLine($"  Mined block #{svc.Chain.Last().Index}. Mempool: {svc.PendingTransactions.Count} tx(s). " +
+                                      $"LockTx still waiting? {svc.PendingTransactions.Contains(lockTx)}");
+                }
+                break;
+
+            case "x":
+                hwFlag = false;
+                break;
+
+            default:
+                Console.WriteLine("Invalid choice.");
+                break;
+        }
+    }
+}
+
+void ShowStorageMenu()
+{
+    bool menuFlag = true;
+    while (menuFlag)
+    {
+        Console.WriteLine("\n=== Storage menu ===");
+        Console.WriteLine("1 - Save chain to file");
+        Console.WriteLine("2 - Load chain from file");
+        Console.WriteLine("x - Back to main menu");
+        Console.Write("Pick option: ");
+
+        switch (Console.ReadLine()?.Trim().ToLowerInvariant())
+        {
+            case "1":
+                Console.Write("Enter file path to save (e.g. chain.json): ");
+                var savePath = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(savePath))
+                {
+                    Console.WriteLine("Invalid path.");
+                    break;
+                }
+                try
+                {
+                    blockChainService.SaveToFile(savePath);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error saving chain: {ex.Message}");
+                }
+                break;
+
+            case "2":
+                Console.Write("Enter file path to load (e.g. chain.json): ");
+                var loadPath = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(loadPath))
+                {
+                    Console.WriteLine("Invalid path.");
+                    break;
+                }
+                try
+                {
+                    blockChainService.LoadFromFile(loadPath);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error loading chain: {ex.Message}");
+                }
+                break;
+
+            case "x":
+                menuFlag = false;
+                break;
+
+            default:
+                Console.WriteLine("Invalid storage choice.");
+                break;
+        }
     }
 }

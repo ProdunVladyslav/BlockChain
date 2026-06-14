@@ -74,5 +74,67 @@ namespace BlockChain.Services
             Block? foundBlock = blockChain.Chain.FirstOrDefault(block => block.Transactions.Any(t => t.Id == txId));
             return (foundBlock, foundTx);
         }
+
+        public Transaction? FindTransactionById(string txId)
+        {
+            Guid.TryParse(txId, out var txGuid);
+            Transaction? tx = blockChain.Chain.SelectMany(b => b.Transactions).FirstOrDefault(t => t.Id == txGuid);
+
+            if (tx == null)
+            {
+                tx = blockChain.PendingTransactions.FirstOrDefault(t => t.Id == txGuid);
+            }
+            return tx;
+        }
+
+        public Block? FindBlockByTransactionId(string txId)
+        {
+            Guid.TryParse(txId, out var txGuid);
+            Transaction? tx = blockChain.Chain.SelectMany(b => b.Transactions).FirstOrDefault(t => t.Id == txGuid);
+
+            if (tx == null)
+                return null;
+
+            Block? foundBlock = blockChain.Chain.FirstOrDefault(block => block.Transactions.Any(t => t.Id == txGuid));
+            return foundBlock;
+        }
+
+        public List<Transaction> GetTransactionHistory(string address)
+        {
+            List<Transaction> txs = blockChain.Chain.SelectMany(b => b.Transactions)
+                .Where(tx => tx.From == address || tx.To == address)
+                .OrderByDescending(tx => tx.Timestamp)
+                .ToList();
+
+            return txs;
+        }
+
+        public List<string> GetOwnedNFTs(string address)
+        {
+            var owned = new HashSet<string>();
+            var txs = blockChain.Chain.SelectMany(b => b.Transactions)
+                .Where(t => t.Type == TransactionType.MINT_NFT && !string.IsNullOrWhiteSpace(t.NftDataUrl))
+                .OrderBy(t => t.Timestamp)
+                .ToList();
+
+            foreach (var tx in txs)
+            {
+                if (tx.To == address)
+                    owned.Add(tx.NftDataUrl!);
+                if (tx.From == address)
+                    owned.Remove(tx.NftDataUrl!);
+            }
+
+            return owned.ToList();
+        }
+
+        public decimal GetTotalFeesEarned(string minerAddress)
+        {
+            return blockChain.Chain
+                .Where(b => b.Author == minerAddress)
+                .SelectMany(b => b.Transactions)
+                .Where(tx => tx.From != "COINBASE")
+                .Sum(tx => tx.Fee);
+        }
     }
 }

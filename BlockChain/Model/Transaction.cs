@@ -7,6 +7,11 @@ using System.Threading.Tasks;
 
 namespace BlockChain.Model
 {
+    public enum TransactionType
+    {
+        DEFAULT,
+        MINT_NFT,
+    }
     public class Transaction
     {
         [JsonPropertyName("id")]
@@ -22,13 +27,21 @@ namespace BlockChain.Model
         [JsonPropertyName("amount")]
         public decimal Amount { get; set; }
 
+        [JsonPropertyName("tokenSymbol")]
+        public string TokenSymbol { get; set; }
+
         [JsonPropertyName("fee")]
         public decimal Fee { get; set; }
 
         [JsonPropertyName("timestamp")]
         public DateTime Timestamp { get; set; } = DateTime.UtcNow;
 
-        public Transaction(string from, string to, decimal amount, decimal fee, int lockTime = 0)
+        [JsonPropertyName("nftDataUrl")]
+        public string? NftDataUrl { get; set; }
+
+        public TransactionType Type { get; set; }
+
+        public Transaction(string from, string to, decimal amount, decimal fee, int lockTime = 0, string tokenSymbol = "MAIN", TransactionType type = TransactionType.DEFAULT, string? nftDataUrl = null)
         {
             Id = Guid.NewGuid();
             From = from;
@@ -36,6 +49,9 @@ namespace BlockChain.Model
             Amount = amount;
             Fee = fee;
             LockTime = lockTime;
+            TokenSymbol = tokenSymbol;
+            Type = type;
+            NftDataUrl = nftDataUrl;
         }
 
         [JsonPropertyName("lockTime")]
@@ -43,7 +59,7 @@ namespace BlockChain.Model
 
         public string ToRawString()
         {
-            return $"{From}{To}{Amount}{Fee}{LockTime}{Timestamp:O}";
+            return $"{From}{To}{Amount}{Fee}{LockTime}{Timestamp:O}{TokenSymbol}{Type}{NftDataUrl}";
         }
 
         public override bool Equals(object? obj)
@@ -60,7 +76,8 @@ namespace BlockChain.Model
 
         public override string ToString()
         {
-            return $"Transaction {Id}, From: {From}, To: {To}, Amount: {Amount}, Fee: {Fee}, LockTime: {LockTime}, Timestamp: {Timestamp:O}";
+            return $"Transaction {Id}, From: {From}, To: {To}, Token: {TokenSymbol}, Amount: {Amount}, Fee: {Fee}, LockTime: {LockTime}, Timestamp: {Timestamp:O}";
         }
+
     }
 }

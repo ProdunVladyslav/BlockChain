@@ -12,7 +12,10 @@ public class ChainSnapshot
     [JsonPropertyName("totalSupply")] 
     public decimal TotalSupply { get; set; }
     [JsonPropertyName("balances")] 
-    public Dictionary<string, decimal> Balances { get; set; } = new();
+    public Dictionary<string, Dictionary<string, decimal>> Balances { get; set; } = new();
+
+
+
     [JsonPropertyName("chain")] 
     public List<Block> Chain { get; set; } = new();
 }

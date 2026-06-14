@@ -7,6 +7,18 @@ using System.Text.Json.Serialization;
 
 namespace BlockChain.Chain
 {
+    public struct TokenBalance
+    {
+        public string TokenSymbol { get; set; }
+        public string WalletAddress { get; set; }
+
+        public TokenBalance(string tokenSymbol, string walletAddress)
+        {
+            TokenSymbol = tokenSymbol;
+            WalletAddress = walletAddress;
+        }
+    }
+
     public class BlockChainService
     {
         public List<Block> Chain { get; private set; } // List to hold the blocks in the blockchain
@@ -25,11 +37,11 @@ namespace BlockChain.Chain
         private readonly int _rateLimitPerSender = 3; // Maximum number of pending transactions allowed per sender to prevent spamming
         private readonly int _ttlTransactionsSeconds = 300; // Time-to-live for transactions in the mempool (5 minutes)
 
-        private readonly Dictionary<string, decimal> Balances = new Dictionary<string, decimal>(); // Dictionary to track balances of public keys (not currently used in this implementation)
+        private readonly Dictionary<TokenBalance, decimal> Balances = new Dictionary<TokenBalance, decimal>(); // Token-aware balance cache: key = (tokenSymbol, walletAddress)
 
-        // Identity baked into the genesis block. All nodes run by the same student must share it
-        // (set the STUDENT_ID env var identically on all 3 terminals) so their genesis — and thus
-        // their whole chain — matches and can be shared. Different students get a different genesis.
+        private TokenBalance MakeKey(string walletAddress, string tokenSymbol) => new TokenBalance(tokenSymbol, walletAddress);
+
+
         public string StudentId { get; }
 
         public BlockChainService()
@@ -43,8 +55,6 @@ namespace BlockChain.Chain
         private void AddGenesisBlock()
         {
             var genesisTransactions = new List<Transaction>();
-            // Author = StudentId so the genesis hash is unique per student but identical across
-            // that student's own nodes. Mined deterministically so the hash is reproducible.
             Block genesisBlock = new Block(0, DateTime.Parse("2024-06-01T00:00:00Z"), genesisTransactions, "0", StudentId, Difficulty);
             genesisBlock.MerkleRoot = HashingService.BuildMerkleRoot(genesisTransactions);
             MiningService.MineBlockDeterministic(genesisBlock, Difficulty);
@@ -62,6 +72,13 @@ namespace BlockChain.Chain
                 return false;
             }
 
+            // Minting transactions are exempt from fee and balance checks
+            if (transaction.From == "MINT")
+            {
+                PendingTransactions.Add(transaction);
+                return true;
+            }
+
             if (transaction.Fee < NetworkBaseFee)
             {
                 Console.WriteLine($"Transaction from {transaction.From} rejected: Fee {transaction.Fee} is below the network base fee of {NetworkBaseFee}.");
@@ -70,14 +87,40 @@ namespace BlockChain.Chain
 
             if (transaction.From != "COINBASE")
             {
-                var balance = GetBalance(transaction.From);
-                var totalPendingAmount = PendingTransactions.Where(x => x.From == transaction.From).Sum(x => x.Amount + x.Fee);
-                if (balance < totalPendingAmount + transaction.Amount + transaction.Fee)
+                var tokenSymbol = transaction.TokenSymbol;
+
+                // 1. Validate the token amount balance for ANY token type (not hardcoded to a specific token)
+                if (tokenSymbol != "MAIN")
                 {
-                    Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient funds. Balance={balance}, needed={totalPendingAmount + transaction.Amount + transaction.Fee}.");
+                    var pendingTokenAmount = PendingTransactions
+                        .Where(x => x.From == transaction.From && x.TokenSymbol == tokenSymbol)
+                        .Sum(x => x.Amount);
+                    var tokenBalance = GetBalance(transaction.From, tokenSymbol);
+                    if (tokenBalance < pendingTokenAmount + transaction.Amount)
+                    {
+                        Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient {tokenSymbol} funds. Balance={tokenBalance}, needed={pendingTokenAmount + transaction.Amount}.");
+                        return false;
+                    }
+                }
+
+                // 2. Validate the MAIN fee balance. Fees are always paid in MAIN.
+                // For MAIN-token transfers, the MAIN balance must also cover the transferred amount.
+                var pendingMainDebit = PendingTransactions
+                    .Where(x => x.From == transaction.From && x.TokenSymbol == "MAIN")
+                    .Sum(x => x.Amount + x.Fee)
+                    + PendingTransactions
+                    .Where(x => x.From == transaction.From && x.TokenSymbol != "MAIN")
+                    .Sum(x => x.Fee);
+
+                var newMainDebit = tokenSymbol == "MAIN" ? transaction.Amount + transaction.Fee : transaction.Fee;
+                var mainBalance = GetBalance(transaction.From, "MAIN");
+                if (mainBalance < pendingMainDebit + newMainDebit)
+                {
+                    Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient MAIN funds for fee. Balance={mainBalance}, needed={pendingMainDebit + newMainDebit}.");
                     return false;
                 }
             }
+
 
             var rateLimited = PendingTransactions.Where(x => x.From == transaction.From).Count() >= _rateLimitPerSender; // Simple rate limit: max 5 pending transactions per sender
             if (rateLimited)
@@ -87,6 +130,35 @@ namespace BlockChain.Chain
 
             PendingTransactions.Add(transaction);
             return true;
+        }
+
+
+        public int MergeMempool(IEnumerable<Transaction> transactions)
+        {
+            int added = 0;
+            foreach (var tx in transactions)
+            {
+                if (PendingTransactions.Any(t => t.Id == tx.Id)) continue;
+                if (tx.From == "COINBASE") continue;
+
+                var validation = TransactionService.ValidateTransaction(tx);
+                if (!validation.isValid)
+                {
+                    Console.WriteLine($"[MergeMempool] Transaction {tx.Id} rejected: {validation.error}");
+                    continue;
+                }
+
+                try
+                {
+                    if (AddTransactionToMempool(tx))
+                        added++;
+                }
+                catch (InvalidOperationException ex)
+                {
+                    Console.WriteLine($"[MergeMempool] Transaction {tx.Id} rejected: {ex.Message}");
+                }
+            }
+            return added;
         }
 
         public event Action<Block>? BlockMined;
@@ -112,7 +184,8 @@ namespace BlockChain.Chain
                 from: "COINBASE",
                 to: minerPublicKey,
                 amount: totalReward,
-                fee: 0m
+                fee: 0m,
+                tokenSymbol: "MAIN"
             );
 
             transactionsToInclude.Add(rewardTransaction);
@@ -179,7 +252,7 @@ namespace BlockChain.Chain
 
         public bool IsChainValid(List<Block> chain)
         {
-            var tempBalances = new Dictionary<string, decimal>();
+            var tempBalances = new Dictionary<TokenBalance, decimal>();
 
             // 1. Empty or missing genesis is invalid
             if (chain == null || chain.Count == 0) return false;
@@ -210,18 +283,22 @@ namespace BlockChain.Chain
                 int coinbaseCount = 0;
                 foreach (var tx in currentBlock.Transactions)
                 {
-                    if (tx.From == "COINBASE")
+                    if (tx.From == "COINBASE" || tx.From == "MINT")
                     {
                         coinbaseCount++;
-                        continue; // coinbase has no signature to verify
+                        continue; // coinbase / mint has no signature to verify
                     }
 
-                    if (tx.From != "COINBASE")
-                    {
-                        decimal senderBalance = tempBalances.ContainsKey(tx.From) ? tempBalances[tx.From] : GetBalance(tx.From);
-                        if (senderBalance < tx.Amount + tx.Fee) return false; // Insufficient funds
-                        tempBalances[tx.From] = senderBalance - (tx.Amount + tx.Fee); // Deduct from sender's balance
-                    }
+                    var tokenKey = MakeKey(tx.From, tx.TokenSymbol);
+                    var feeKey = MakeKey(tx.From, "MAIN");
+                    decimal tokenBalance = tempBalances.ContainsKey(tokenKey) ? tempBalances[tokenKey] : GetBalance(tx.From, tx.TokenSymbol);
+                    decimal mainBalance = tempBalances.ContainsKey(feeKey) ? tempBalances[feeKey] : GetBalance(tx.From, "MAIN");
+
+                    if (tokenBalance < tx.Amount) return false; // Insufficient token funds
+                    if (mainBalance < tx.Fee) return false; // Insufficient MAIN for fee
+
+                    tempBalances[tokenKey] = tokenBalance - tx.Amount;
+                    tempBalances[feeKey] = mainBalance - tx.Fee;
 
                     var (isValid, _) = TransactionService.ValidateTransaction(tx);
                     if (!isValid)
@@ -231,16 +308,13 @@ namespace BlockChain.Chain
                         return false;
                     }
 
-                    if (!tempBalances.ContainsKey(tx.From))
+                    var toKey = MakeKey(tx.To, tx.TokenSymbol);
+                    if (!tempBalances.ContainsKey(toKey))
                     {
-                        tempBalances[tx.From] = 0;
-                    }
-                    if (!tempBalances.ContainsKey(tx.To))
-                    {
-                        tempBalances[tx.To] = 0;
+                        tempBalances[toKey] = 0;
                     }
 
-                    tempBalances[tx.To] += tx.Amount;
+                    tempBalances[toKey] += tx.Amount;
                 }
 
                 // f. Exactly one coinbase per block (no double-rewarding)
@@ -248,6 +322,38 @@ namespace BlockChain.Chain
             }
 
             return true;
+        }
+
+
+        public (bool, string) BroadcastTransactionFromFile(string filePath)
+        {
+            if (!File.Exists(filePath))
+            {
+                return (false, $"File not found: {filePath}");
+            }
+            try
+            {
+                string json = File.ReadAllText(filePath);
+                var options = new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true,
+                    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+                };
+                var transaction = JsonSerializer.Deserialize<Transaction>(json, options);
+                if (transaction == null)
+                {
+                    return (false, $"Failed to deserialize transaction from {filePath}");
+                }
+                bool added = AddTransactionToMempool(transaction);
+                if (added)
+                    return (true, $"Transaction {transaction.Id} added to mempool successfully.");
+                else
+                    return (false, $"Transaction {transaction.Id} failed validation and was not added to mempool.");
+            }
+            catch (Exception ex)
+            {
+                return (false, $"Error processing transaction file: {ex.Message}");
+            }
         }
 
         public List<string> AnalyzeChain()
@@ -302,34 +408,54 @@ namespace BlockChain.Chain
             return errors;
         }
 
-        public decimal GetBalance(string publicKey)
+        public decimal GetBalance(string publicKey, string tokenSymbol = "MAIN")
         {
-            if (Balances.ContainsKey(publicKey))
+            var key = MakeKey(publicKey, tokenSymbol);
+            if (Balances.ContainsKey(key))
             {
-                return Balances[publicKey]; // Return the cached balance if it exists
+                return Balances[key]; // Return the cached balance if it exists
             }
             return 0; // Return 0 if the balance is not found
         }
 
-        public decimal UnoptimisedGetBalance(string publicKey)
+        public Dictionary<string, decimal> GetAllBalances(string publicKey)
+        {
+            var result = new Dictionary<string, decimal>();
+            foreach (var kvp in Balances)
+            {
+                if (kvp.Key.WalletAddress == publicKey && kvp.Value > 0)
+                {
+                    result[kvp.Key.TokenSymbol] = kvp.Value;
+                }
+            }
+            return result;
+        }
+
+        public decimal UnoptimisedGetBalance(string publicKey, string tokenSymbol = "MAIN")
         {
             decimal balance = 0;
             foreach (Block block in Chain)
             {
                 foreach (Transaction transaction in block.Transactions)
                 {
-                    if (transaction.From == publicKey)
+                    if (transaction.From == publicKey && transaction.TokenSymbol == tokenSymbol)
                     {
-                        balance -= transaction.Amount; // Subtract the amount from the sender's balance
+                        balance -= transaction.Amount; // Subtract the token amount from the sender's balance
                     }
-                    if (transaction.To == publicKey)
+                    if (transaction.To == publicKey && transaction.TokenSymbol == tokenSymbol)
                     {
-                        balance += transaction.Amount; // Add the amount to the recipient's balance
+                        balance += transaction.Amount; // Add the token amount to the recipient's balance
+                    }
+                    // Fees are always paid in MAIN
+                    if (transaction.From == publicKey && tokenSymbol == "MAIN" && transaction.Fee > 0)
+                    {
+                        balance -= transaction.Fee;
                     }
                 }
             }
             return balance; // Return the calculated balance
         }
+
 
         public void ApplyBlock(Block block)
         {
@@ -343,23 +469,31 @@ namespace BlockChain.Chain
         {
             foreach (Transaction transaction in block.Transactions)
             {
-                if (transaction.From != "COINBASE")
+                if (transaction.From != "COINBASE" && transaction.From != "MINT")
                 {
-                    if (!Balances.ContainsKey(transaction.From))
-                    {
-                        Balances[transaction.From] = 0;
-                    }
-                    Balances[transaction.From] -= (transaction.Amount + transaction.Fee); // not + fee - NetworkBaseFee// Subtract the amount from the sender's balance
-                    if (Balances[transaction.From] < 0)
-                        throw new InvalidOperationException($"Negative balance for {transaction.From} after processing transaction {transaction.Id}");
+                    var tokenKey = MakeKey(transaction.From, transaction.TokenSymbol);
+                    if (!Balances.ContainsKey(tokenKey))
+                        Balances[tokenKey] = 0;
+                    Balances[tokenKey] -= transaction.Amount;
+                    if (Balances[tokenKey] < 0)
+                        throw new InvalidOperationException($"Negative {transaction.TokenSymbol} balance for {transaction.From} after processing transaction {transaction.Id}");
+
+                    // Fee is always paid in MAIN
+                    var feeKey = MakeKey(transaction.From, "MAIN");
+                    if (!Balances.ContainsKey(feeKey))
+                        Balances[feeKey] = 0;
+                    Balances[feeKey] -= transaction.Fee;
+                    if (Balances[feeKey] < 0)
+                        throw new InvalidOperationException($"Negative MAIN fee balance for {transaction.From} after processing transaction {transaction.Id}");
                 }
-                if (!Balances.ContainsKey(transaction.To))
-                {
-                    Balances[transaction.To] = 0;
-                }
-                Balances[transaction.To] += transaction.Amount; // Add the amount to the recipient's balance
+
+                var toKey = MakeKey(transaction.To, transaction.TokenSymbol);
+                if (!Balances.ContainsKey(toKey))
+                    Balances[toKey] = 0;
+                Balances[toKey] += transaction.Amount; // Add the token amount to the recipient's balance
             }
         }
+
 
         public void RebuildState()
         {
@@ -391,6 +525,18 @@ namespace BlockChain.Chain
             return totalSupply;
         }
 
+        private Dictionary<string, Dictionary<string, decimal>> ConvertBalancesToNestedDictionary(Dictionary<TokenBalance, decimal> balances)
+        {
+            var nested = new Dictionary<string, Dictionary<string, decimal>>();
+            foreach (var kvp in balances)
+            {
+                if (!nested.ContainsKey(kvp.Key.TokenSymbol))
+                    nested[kvp.Key.TokenSymbol] = new Dictionary<string, decimal>();
+                nested[kvp.Key.TokenSymbol][kvp.Key.WalletAddress] = kvp.Value;
+            }
+            return nested;
+        }
+
         public void SaveToFile(string filePath)
         {
             var snapshot = new ChainSnapshot
@@ -399,7 +545,8 @@ namespace BlockChain.Chain
                 ChainLength = Chain.Count,
                 Difficulty = Difficulty,
                 TotalSupply = GetTotalSupply(),
-                Balances = new Dictionary<string, decimal>(Balances), // copy so it's safe
+                Balances = ConvertBalancesToNestedDictionary(Balances), // copy so it's safe
+
                 Chain = Chain
             };
 
@@ -439,11 +586,16 @@ namespace BlockChain.Chain
                     Balances.Clear();
                     if (snapshot.Balances != null)
                     {
-                        foreach (var kvp in snapshot.Balances)
+                        foreach (var tokenKvp in snapshot.Balances)
                         {
-                            Balances[kvp.Key] = kvp.Value;
+                            string tokenSymbol = tokenKvp.Key;
+                            foreach (var walletKvp in tokenKvp.Value)
+                            {
+                                Balances[MakeKey(walletKvp.Key, tokenSymbol)] = walletKvp.Value;
+                            }
                         }
                     }
+
                     Console.WriteLine($"Chain loaded from {filePath} with {Chain.Count} blocks and total supply of {GetTotalSupply()}");
                     Console.WriteLine($"Validating Chain: {IsChainValid()}");
                 }
@@ -462,22 +614,26 @@ namespace BlockChain.Chain
         {
             foreach (Transaction transaction in block.Transactions)
             {
-                if (transaction.From != "COINBASE")
+                if (transaction.From != "COINBASE" && transaction.From != "MINT")
                 {
-                    if (!Balances.ContainsKey(transaction.From))
-                        Balances[transaction.From] = 0;
+                    var tokenKey = MakeKey(transaction.From, transaction.TokenSymbol);
+                    if (!Balances.ContainsKey(tokenKey))
+                        Balances[tokenKey] = 0;
+                    Balances[tokenKey] += transaction.Amount;
 
-                    // Undo the deduction: give the sender back what they spent
-                    Balances[transaction.From] += (transaction.Amount + transaction.Fee);
+                    var feeKey = MakeKey(transaction.From, "MAIN");
+                    if (!Balances.ContainsKey(feeKey))
+                        Balances[feeKey] = 0;
+                    Balances[feeKey] += transaction.Fee;
                 }
 
-                if (!Balances.ContainsKey(transaction.To))
-                    Balances[transaction.To] = 0;
-
-                // Undo the credit: take back what the recipient received
-                Balances[transaction.To] -= transaction.Amount;
+                var toKey = MakeKey(transaction.To, transaction.TokenSymbol);
+                if (!Balances.ContainsKey(toKey))
+                    Balances[toKey] = 0;
+                Balances[toKey] -= transaction.Amount;
             }
         }
+
 
         public void ReplaceChain(List<Block> newChain)
         {
@@ -485,14 +641,58 @@ namespace BlockChain.Chain
             if (!IsChainValid(newChain)) return;
             if (newChain.Sum(x => x.DifficultyAtMining) <= Chain.Sum(x => x.DifficultyAtMining)) return;
 
+            var oldChain = Chain;
+            var forkIndex = FindForkIndex(oldChain, newChain);
+
+            // 1. Rebuild balances from the new chain so rescued transactions are validated correctly
             Balances.Clear();
             foreach (var block in newChain)
             {
                 UpdateBalances(block);
             }
 
-            var minedTxIds = new HashSet<Guid>(Chain.SelectMany(b => b.Transactions).Select(t => t.Id));
+            // 2. Remove any pending transactions that are already confirmed in the new chain
+            var minedTxIds = new HashSet<Guid>(newChain.SelectMany(b => b.Transactions).Select(t => t.Id));
             PendingTransactions.RemoveAll(t => minedTxIds.Contains(t.Id));
+
+            // 3. Operation Phoenix: rescue orphaned non-coinbase transactions from the discarded fork
+            var rescuedTxIds = new HashSet<Guid>();
+            var newChainTxIds = new HashSet<Guid>(minedTxIds);
+            int rescuedCount = 0;
+
+            for (int i = forkIndex; i < oldChain.Count; i++)
+            {
+                foreach (var tx in oldChain[i].Transactions)
+                {
+                    if (tx.From == "COINBASE") continue;
+                    if (newChainTxIds.Contains(tx.Id)) continue;
+                    if (!rescuedTxIds.Add(tx.Id)) continue;
+                    if (PendingTransactions.Any(t => t.Id == tx.Id)) continue;
+
+                    var validation = TransactionService.ValidateTransaction(tx);
+                    if (!validation.isValid)
+                    {
+                        Console.WriteLine($"[Phoenix] Transaction {tx.Id} from block #{i} invalid after reorg: {validation.error}");
+                        continue;
+                    }
+
+                    try
+                    {
+                        if (AddTransactionToMempool(tx))
+                            rescuedCount++;
+                    }
+                    catch (InvalidOperationException ex)
+                    {
+                        Console.WriteLine($"[Phoenix] Transaction {tx.Id} from block #{i} rejected: {ex.Message}");
+                    }
+                }
+            }
+
+            if (rescuedCount > 0)
+            {
+                Console.WriteLine($"[Phoenix] Врятовано {rescuedCount} транзакцій з відкинутих блоків та повернуто в Mempool");
+            }
+
             Chain = newChain;
         }
 
