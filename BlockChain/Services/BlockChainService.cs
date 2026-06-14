@@ -89,7 +89,7 @@ namespace BlockChain.Chain
             {
                 var tokenSymbol = transaction.TokenSymbol;
 
-                // 1. Validate the token amount balance for ANY token type (not hardcoded to a specific token)
+                // Validate the token amount balance for ANY non-MAIN token (custom tokens)
                 if (tokenSymbol != "MAIN")
                 {
                     var pendingTokenAmount = PendingTransactions
@@ -102,21 +102,32 @@ namespace BlockChain.Chain
                         return false;
                     }
                 }
+                else
+                {
+                    // For MAIN token transfers, the amount must also be covered by the MAIN balance
+                    var pendingMainAmount = PendingTransactions
+                        .Where(x => x.From == transaction.From && x.TokenSymbol == "MAIN")
+                        .Sum(x => x.Amount);
+                    var mainAmountBalance = GetBalance(transaction.From, "MAIN");
+                    if (mainAmountBalance < pendingMainAmount + transaction.Amount)
+                    {
+                        Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient MAIN funds for amount. Balance={mainAmountBalance}, needed={pendingMainAmount + transaction.Amount}.");
+                        return false;
+                    }
+                }
 
                 // 2. Validate the MAIN fee balance. Fees are always paid in MAIN.
-                // For MAIN-token transfers, the MAIN balance must also cover the transferred amount.
-                var pendingMainDebit = PendingTransactions
-                    .Where(x => x.From == transaction.From && x.TokenSymbol == "MAIN")
-                    .Sum(x => x.Amount + x.Fee)
-                    + PendingTransactions
+                var pendingMainFee = PendingTransactions
                     .Where(x => x.From == transaction.From && x.TokenSymbol != "MAIN")
+                    .Sum(x => x.Fee)
+                    + PendingTransactions
+                    .Where(x => x.From == transaction.From && x.TokenSymbol == "MAIN")
                     .Sum(x => x.Fee);
 
-                var newMainDebit = tokenSymbol == "MAIN" ? transaction.Amount + transaction.Fee : transaction.Fee;
-                var mainBalance = GetBalance(transaction.From, "MAIN");
-                if (mainBalance < pendingMainDebit + newMainDebit)
+                var mainFeeBalance = GetBalance(transaction.From, "MAIN");
+                if (mainFeeBalance < pendingMainFee + transaction.Fee)
                 {
-                    Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient MAIN funds for fee. Balance={mainBalance}, needed={pendingMainDebit + newMainDebit}.");
+                    Console.WriteLine($"Transaction from {transaction.From} rejected: Insufficient MAIN funds for fee. Balance={mainFeeBalance}, needed={pendingMainFee + transaction.Fee}.");
                     return false;
                 }
             }
@@ -279,14 +290,28 @@ namespace BlockChain.Chain
                 // d. Hash must meet the difficulty target that was declared at mining
                 if (!MeetsDifficulty(currentBlock)) return false;
 
-                // e. Every non-coinbase transaction must have a valid signature
+                // e. Every non-coinbase/non-mint transaction must have a valid signature
+                //    and exactly one coinbase is required per block. Mints are system
+                //    emissions and are separate from miner rewards.
                 int coinbaseCount = 0;
                 foreach (var tx in currentBlock.Transactions)
                 {
-                    if (tx.From == "COINBASE" || tx.From == "MINT")
+                    if (tx.From == "COINBASE")
                     {
                         coinbaseCount++;
-                        continue; // coinbase / mint has no signature to verify
+                        continue; // coinbase has no signature to verify
+                    }
+
+                    if (tx.From == "MINT")
+                    {
+                        // System mint: no signature, no balance check, just validate structure
+                        var (isMintValid, _) = TransactionService.ValidateTransaction(tx);
+                        if (!isMintValid)
+                        {
+                            LogSecurityAlert(tx);
+                            return false;
+                        }
+                        continue;
                     }
 
                     var tokenKey = MakeKey(tx.From, tx.TokenSymbol);
