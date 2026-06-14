@@ -10,9 +10,20 @@ namespace BlockChain.Services
             cryptoService = new CryptoService();
         }
 
-        public static Transaction CreateTransaction(string from, string to, decimal amount, decimal fee)
+        public static Transaction CreateTransaction(string from, string to, decimal amount, decimal fee, string tokenSymbol = "MAIN", TransactionType type = TransactionType.DEFAULT, string nftDataUrl = null)
         {
-            var tx = new Transaction(from, to, amount, fee);
+            if (type == TransactionType.MINT_NFT)
+            {
+                if (string.IsNullOrWhiteSpace(nftDataUrl))
+                {
+                    throw new ArgumentException("NFT data URL must be provided for MINT_NFT transactions.", nameof(nftDataUrl));
+                }
+                if (amount != 1)
+                {
+                    throw new ArgumentException("Amount must be one for MINT_NFT transactions.", nameof(amount));
+                }
+            }
+            var tx = new Transaction(from, to, amount, fee, tokenSymbol: tokenSymbol, type: type, nftDataUrl: nftDataUrl);
             var validation = ValidateTransaction(tx, false);
             if (!validation.isValid)
             {
@@ -20,6 +31,7 @@ namespace BlockChain.Services
             }
             return tx;
         }
+
 
         public static (bool isValid, string error) ValidateTransaction(Transaction transaction, bool checkSignature = true)
         {
@@ -30,12 +42,22 @@ namespace BlockChain.Services
             if (string.IsNullOrWhiteSpace(transaction.To))
                 return (false, "Recipient address cannot be empty.");
             if (transaction.Amount <= 0) return (false, "Amount must be greater than zero.");
-            if (transaction.From == "COINBASE")
+
+            if (transaction.Type == TransactionType.MINT_NFT)
             {
-                // Coinbase transactions don't need signature validation
+                if (string.IsNullOrWhiteSpace(transaction.NftDataUrl))
+                    return (false, "NFT data URL must be provided for MINT_NFT transactions.");
+                if (transaction.Amount != 1)
+                    return (false, "Amount must be exactly one for MINT_NFT transactions.");
+            }
+
+            if (transaction.From == "COINBASE" || transaction.From == "MINT")
+            {
+                // Coinbase and mint transactions don't need signature validation
                 if(transaction.Fee < 0) return (false, "Transaction fee must be non-negative.");
                 return (true, string.Empty);
             }
+
 
             if (checkSignature)
             {

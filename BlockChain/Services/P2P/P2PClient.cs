@@ -210,6 +210,57 @@ namespace BlockChain.Services.P2P
             }
         }
 
+        public async Task<List<Transaction>?> RequestMempoolAsync(string ip, int port)
+        {
+            var message = new NetworkMessage("REQUEST_MEMPOOL", "");
+            var jsonMessage = System.Text.Json.JsonSerializer.Serialize(message);
+
+            try
+            {
+                using var client = new TcpClient();
+                await client.ConnectAsync(ip, port);
+                using var stream = client.GetStream();
+                using var reader = new StreamReader(stream);
+                using var writer = new StreamWriter(stream) { AutoFlush = true };
+
+                await writer.WriteLineAsync(jsonMessage);
+                Console.WriteLine($"Mempool requested from {ip}:{port}");
+
+                var responseLine = await reader.ReadLineAsync();
+                if (string.IsNullOrEmpty(responseLine)) return null;
+
+                var response = System.Text.Json.JsonSerializer.Deserialize<NetworkMessage>(responseLine);
+                if (response == null || response.Type != "SYNC_MEMPOOL") return null;
+
+                var transactions = System.Text.Json.JsonSerializer.Deserialize<List<Transaction>>(response.Data);
+                return transactions;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error requesting mempool from {ip}:{port}: {ex.Message}");
+                return null;
+            }
+        }
+
+        public async Task<List<Transaction>?> RequestFullSyncAsync(string peerAddress, bool fullNode)
+        {
+            await ConnectAsync(peerAddress);
+            if (!_peers.Contains(peerAddress))
+                return null;
+
+            var parts = peerAddress.Split(':');
+            if (parts.Length != 2 || !int.TryParse(parts[1], out int port))
+                return null;
+
+            var ip = parts[0];
+            var mempool = await RequestMempoolAsync(ip, port);
+
+            if (fullNode)
+                await RequestChainAsync(ip, port);
+
+            return mempool;
+        }
+
         public async Task BroadcastChainAsync(List<Block> chain)
         {
             var jsonChain = System.Text.Json.JsonSerializer.Serialize(chain);

@@ -14,6 +14,12 @@ namespace BlockChain.Model
         public string PublicKey { get; set; } // The public key can be shared freely and is used to receive funds
         [JsonPropertyName("privateKey")]
         public string PrivateKey { get; set; } // The private key should be kept secret and is used to sign transactions
+        public Wallet(CryptoService cryptoService, string publicKey, string privateKey)
+        {
+            PublicKey = publicKey;
+            PrivateKey = privateKey;
+        }
+
         public Wallet(CryptoService cryptoService)
         {
             var keys = cryptoService.GenerateKeyPair(); // Generate a new key pair when the wallet is created
